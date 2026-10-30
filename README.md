@@ -22,14 +22,10 @@ This repository is a proof of concept of the whole tool chain and of a standard 
 | directory | contents |
 |---|---|
 | `meteor/` | the compiler: `frontend.py` (source -> AST), `backend.py` (AST -> Quartz assembler), `bsontool.py` |
-| `qasm/` | the Quartz assembler (`qasm.py`): assembler text -> binary image |
-| `quartz-src/` | the Quartz VM in C (needs raylib for the window) |
 | `inc/` | `std.quartz` (device / port constants) and `kb.quartz` (key codes) |
 | `lib/` | the **Meteor standard library** - 19 modules, see [`lib/README.md`](lib/README.md) |
-| `examples/` | 25 small programs, all of them built on the library |
-| `examples-new/` | 18 more programs: games, tools, demos, a disk shell |
+| `examples/` | example programs, all of them built on the library |
 | `calc/` | a bigger project: a desktop with a calculator (a module + a program) |
-| `tests/` | unit, screen and session tests of the libraries (also the disk and file system ones), run in a headless VM |
 | `tools/` | the headless VM `qhead`, `fstool.py` for disk images, test and build helpers |
 | `doc/BACKEND.md` | the JSON AST that the backend reads (the format between the two compiler stages) |
 
@@ -47,19 +43,11 @@ everything in the **headless VM** (`tools/qhead`, only needs `gcc`).
 
 ```sh
 ./build-modules              # compile lib/*.meteor to lib/*.obj - once, and after every change of the library
-./run hello_world            # compile examples/hello_world.meteor (or examples-new/...) and start it
+./run hello_world            # compile examples/hello_world.meteor and start it
 ./run snake --videomode 1    # extra options go to the quartz binary
 ./calc-scenario2             # the calculator
 ```
 
-Without a window:
-
-```sh
-./tools/build-qhead                                          # builds tools/qhead
-./tools/mbuild examples-new/primes.meteor                    # -> dist/primes.bin
-./tools/qhead dist/primes.bin --ram 8388608 --frames 10 --text   # run 10 frames and print the text screen
-./tests/run-tests                                            # all library tests
-```
 
 ## The Quartz VM in five minutes
 
@@ -376,7 +364,7 @@ fs_automount(std.BUS_DEV_DISK0);                 // 5. all volumes of the disk i
 n = fsck_run(std.BUS_DEV_DISK0, v, 0);           // 6. 0 = consistent
 ```
 
-`examples-new/diskprep` is exactly this, with output; `examples-new/fsshell` is an interactive shell for all of it
+`examples/diskprep` is exactly this, with output; `examples/fsshell` is an interactive shell for all of it
 (`PART`, `FORMAT`, `FSCK`, `MOUNT`, ... and `DIR`, `CD`, `COPY`, `TYPE`, `ECHO > file`, ...). On the host,
 `tools/fstool.py` makes images, edits the table, formats, copies files in and checks them - an independent
 implementation of both formats, so it is also how the Meteor code is tested:
@@ -403,16 +391,11 @@ would not fit).
 | script | does |
 |---|---|
 | `./build-modules` | compiles `lib/*.meteor` into `lib/*.obj` (in dependency order) |
-| `./run NAME [opts]` | builds `examples/NAME.meteor` or `examples-new/NAME.meteor` into `dist/` and starts `./quartz` |
+| `./run NAME [opts]` | builds `examples/NAME.meteor` or `examples/NAME.meteor` into `dist/` and starts `./quartz` |
 | `./run-live` | live reload while you edit `examples/live.meteor` (needs a `scripts/watchdog.py`, not part of this repository) |
 | `./calc-scenario1`, `./calc-scenario2` | build and start the calculator (scenario 2 keeps the 1.2 MB wallpaper in an external data segment - a much faster build) |
 | `./calc-build [--ext-data]` | only compiles the calculator |
 | `./clean`, `./calc-clean` | remove the build products |
-| `tools/mbuild FILE.meteor [dist]` | `.meteor` -> `.bin` in one step (also used by the tests) |
-| `tools/qhead` | the headless VM (see below), built by `tools/build-qhead` |
-| `tools/gen-libdoc.py` | regenerates `lib/README.md` |
-| `tools/fstool.py` | disk images on the host: partitions, formatting, ls / cat / put / mkdir, `check` (see above) |
-| `tools/mkinput.py` | turns typed lines of text into an input script for `qhead` (used by the session tests) |
 
 The backend takes `--ext-data` (static data goes to a separate data segment instead of thousands of `store`
 instructions), `--comments` (annotated assembler) and writes the RAM map of every program as comments at the top
@@ -425,7 +408,7 @@ to write another frontend for the same backend.
 
 All of them are built on the library. `./run NAME` starts one.
 
-### `examples/` (the original 25 programs, now using `lib/`)
+### `examples/` (example programs)
 
 | name | what it shows |
 |---|---|
@@ -444,11 +427,6 @@ All of them are built on the library. `./run NAME` starts one.
 | `map_functions`, `sort_search` | maps, functions, `switch`, `do-while`; sorting and binary search |
 | `net` | the network card |
 | `test` | a self test of the VM's instruction set (deliberately library free) |
-
-### `examples-new/`
-
-| name | what it is | controls |
-|---|---|---|
 | `snake` | the classic, with speed ups and a best score | arrows, Enter |
 | `paint` | drawing with 16 colours, brush sizes and an eraser | mouse, `+` / `-`, `C` |
 | `analog_clock` | an analog clock with a digital readout (fixed point sin / cos) | Esc |
@@ -485,7 +463,7 @@ first version (`src/font_*_sheet.png`, `png2bin_fontsheet.py`) are no longer use
   `<name>.disk0` (its size in sectors) or `<name>.prep` (a script that builds the image, e.g. with `fstool.py`),
   and `<name>.fscheck` (options for `fstool.py check`, so that the **independent host implementation** verifies the
   disk that the Meteor code has just written). `tests/sessions/*.txt` drive a whole program with typed text
-  (`examples-new/fsshell`) and compare its final screen with `<name>.expected`.
+  (`examples/fsshell`) and compare its final screen with `<name>.expected`.
 * `tools/check-all` builds all examples and the calculator and starts each of them in the headless VM, looking
   for compile errors and VM faults.
 * **`tools/qhead`** is a headless host for the Quartz VM: it uses the real `vm.c` / `bus.c` / `disk.c` and replaces
