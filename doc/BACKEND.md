@@ -4,8 +4,8 @@ Meteor is a small compiler backend for the Quartz VM. You describe a program as 
 (variables, expressions, `if` / `while` / `for` / `do` / `switch`, functions, bus I/O) and Meteor
 writes Quartz assembler. Assembling is a separate step (`qasm.py`).
 
-    python3 meteor.py examples/03_hello_world.bson          # BSON or JSON, detected automatically -> .quartz
-    python3 meteor.py examples/03_hello_world.json          # exactly the same command
+    python3 meteor.py examples/hello_world.bson          # BSON or JSON, detected automatically -> .quartz
+    python3 meteor.py examples/hello_world.json          # exactly the same command
     python3 meteor.py prog.bson -o out.quartz               # custom output ("-" = stdout)
     python3 meteor.py prog.bson --ext-data                  # static data -> out.data.json + %data
     python3 meteor.py prog.bson --comments                  # structure comments in the output
@@ -31,10 +31,10 @@ Decoded values are normalised to plain JSON types (pymongo's `Int64` becomes `in
 outside objects/arrays/strings/numbers/booleans/null (dates, binary, ObjectId, ...) are rejected
 with a clear error.
 
-`tools/bsontool.py` converts between the formats:
+`meteor/bsontool.py` converts between the formats:
 
-    python3 tools/bsontool.py json2bson prog.json --imports-bson   # -> prog.bson ("x.json" imports -> "x.bson")
-    python3 tools/bsontool.py bson2json prog.bson                  # -> prog.json
+    python3 meteor/bsontool.py json2bson prog.json --imports-bson   # -> prog.bson ("x.json" imports -> "x.bson")
+    python3 meteor/bsontool.py bson2json prog.bson                  # -> prog.json
 
 JSON integers become BSON int32/int64, floats become doubles (so `2` and `2.0` stay different);
 integers beyond int64 must be written as strings such as `"0xFFFFFFFFFFFFFFFF"`.
@@ -84,16 +84,16 @@ key codes from `kb.quartz` (`kb.KEY_LEFT`, …).
 
 | File | Shows |
 |---|---|
-| `01_sort_search` | consts, arrays, `for`, `while`, `if/elif/else`, `break` |
-| `02_map_functions` | maps (`get/set/has/del`), functions with params/returns, f32, `do-while`, `switch` |
-| `03_hello_world` | text mode printing (`lib/text.json`): strings, signed numbers, hex, colours |
-| `04_text_table` | cursor positioning, padded numbers, nested loops, `bus_reset` |
-| `05_clock` | RTC device on the bus, redraw only when the second changes |
-| `06_gfx_shapes` | pixel graphics (`lib/gfx.json`): rects, gradient, Bresenham lines, circles, clipping, `video` |
-| `07_mandelbrot` | f32 maths, rows pushed to the screen with a bulk `outb` |
-| `08_keyboard_dot` | keyboard polling with `inb`, `switch` on key codes, `kb.quartz` constants |
-| `09_life` | Game of Life on a torus: 2-D indexing, `memcpy`, text rendering |
-| `10_beep` | builds a WAV in RAM and plays it via the audio device (`bus_status`, `outb`) |
+| `sort_search` | consts, arrays, `for`, `while`, `if/elif/else`, `break` |
+| `map_functions` | maps (`get/set/has/del`), functions with params/returns, f32, `do-while`, `switch` |
+| `hello_world` | text mode printing (`lib/text.json`): strings, signed numbers, hex, colours |
+| `text_table` | cursor positioning, padded numbers, nested loops, `bus_reset` |
+| `clock` | RTC device on the bus, redraw only when the second changes |
+| `gfx_shapes` | pixel graphics (`lib/gfx.json`): rects, gradient, Bresenham lines, circles, clipping, `video` |
+| `mandelbrot` | f32 maths, rows pushed to the screen with a bulk `outb` |
+| `keyboard_dot` | keyboard polling with `inb`, `switch` on key codes, `kb.quartz` constants |
+| `life` | Game of Life on a torus: 2-D indexing, `memcpy`, text rendering |
+| `beep` | builds a WAV in RAM and plays it via the audio device (`bus_status`, `outb`) |
 
 Each example exists as `NN_name.bson` (default input) and `NN_name.json` (readable source);
 the `.quartz` files were generated with `meteor.py NN_name.bson`.
