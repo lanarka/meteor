@@ -1,0 +1,170 @@
+program "lake - LakeBios 0.1, a minimal text-mode bootloader. Checks which of DISK0/DISK1 are attached, lets you pick one with a Turbo Vision style dialog when both are (Up/Down, Enter), reads LBA 0 (magic 0xB0 0x01, kernel LBA / size / entrypoint) and starts the kernel with vmx (port of lake.quartz, uses lib/tui, lib/input and lib/disk)";
+import "../lib/tui.obj";
+import "../lib/input.obj";
+import "../lib/disk.obj";
+/// the kernel replaces everything from KERNEL_LOAD_ADDR up, so all variables stay below it
+ram(start: 0x200);
+
+const TEXT_FG = 0xFFFFFFFF;
+const TEXT_BG = 0xFF000000;
+const DIALOG_FG = 0xFFFFFFFF;
+const DIALOG_BG = 0xFFFF0000;
+const DIALOG_FG_SEL = 0xFFFF0000;
+const DIALOG_BG_SEL = 0xFFFFFFFF;
+const DIALOG_BOX_W = 20;
+const KERNEL_LOAD_ADDR = 0x1000;
+const MAGIC0 = 0xB0;
+const MAGIC1 = 0x01;
+
+let boot_sector: u8[DISK_SECTOR] at 0;
+let chosen_disk: u32;
+let box_x: u32;
+let box_y: u32;
+let selection: u32;
+let s_title: u8[] = "LakeBios 0.1";
+let s_disk_not_connected: u8[] = "Disk not connected";
+let s_no_bootable: u8[] = "No bootable media found";
+let s_select_boot_disk: u8[] = "Select boot disk:";
+let s_disk0: u8[] = "Disk 0";
+let s_disk1: u8[] = "Disk 1";
+
+function print_no_bootable_media() {
+    text_clear();
+    tui_str(0, 0, addr(s_no_bootable), TEXT_FG, TEXT_BG);
+}
+
+function boot_from_disk() {
+    let dev: u32;
+    let klba: u32;
+    let ksize: u32;
+    let kentry: u32;
+    let ram: u32;
+
+    /// input: chosen_disk. On failure prints 'No bootable media found' and returns; on success vmx hands control to the kernel
+    dev = chosen_disk;
+    /// read LBA 0 (the boot sector) into RAM
+    if (disk_read(dev, 0, addr(boot_sector), 1) == 0) {
+        print_no_bootable_media();
+        return;
+    }
+    /// magic 0xB0 0x01
+    if (boot_sector[0] != MAGIC0 || boot_sector[1] != MAGIC1) {
+        print_no_bootable_media();
+        return;
+    }
+    /// header: kernel_start_lba (u8 @2), kernel_size_bytes (u32 @3), kernel_entrypoint (u32 @7)
+    klba = u32(peek(addr(boot_sector, 2), u8));
+    ksize = peek(addr(boot_sector, 3), u32);
+    kentry = peek(addr(boot_sector, 7), u32);
+    /// zero-length kernel, or an entrypoint outside the kernel data
+    if (ksize == 0 || kentry >= ksize) {
+        print_no_bootable_media();
+        return;
+    }
+    /// does the kernel fit into RAM at KERNEL_LOAD_ADDR? compared as ram_size - KERNEL_LOAD_ADDR >= size, never as
+    /// KERNEL_LOAD_ADDR + size <= ram_size, which can wrap around for a corrupt size near 2^32
+    ram = sys_ram_size();
+    if (ram <= KERNEL_LOAD_ADDR) {
+        print_no_bootable_media();
+        return;
+    }
+    ram = ram - KERNEL_LOAD_ADDR;
+    if (ksize > ram) {
+        print_no_bootable_media();
+        return;
+    }
+    /// read the kernel data
+    if (disk_read_bytes(dev, klba, KERNEL_LOAD_ADDR, ksize) == 0) {
+        print_no_bootable_media();
+        return;
+    }
+    /// clear the screen, beep and warm-restart into the kernel (Meteor has no vmx statement, so plain assembler)
+    text_clear();
+    bell();
+    asm [
+        "movi u32 #0 {KERNEL_LOAD_ADDR}", "load u32 #1 {ksize}", "load u32 #2 {kentry}",
+        "vmx #0 #1 #2"
+    ];
+}
+
+/// one row of the dialog: a selected row is drawn with inverted colours across the whole row
+function draw_item_row(y: u32, selected: u32, label: u32) {
+    let fg: u32;
+    let bg: u32;
+
+    if (selected == 0) {
+        fg = DIALOG_FG;
+        bg = DIALOG_BG;
+    } else {
+        fg = DIALOG_FG_SEL;
+        bg = DIALOG_BG_SEL;
+    }
+    tui_fill(box_x + 1, y, DIALOG_BOX_W - 2, 1, 32, fg, bg);
+    /// the label, 3 columns in from the left border
+    tui_str(box_x + 3, y, label, fg, bg);
+}
+
+function is_sel(n: u32): u32 {
+    if (selection == n) {
+        return 1;
+    }
+    return 0;
+}
+
+function dsd_draw() {
+    tui_box(box_x, box_y, DIALOG_BOX_W, 4, TUI_FRAME_DOUBLE, DIALOG_FG, DIALOG_BG);
+    draw_item_row(box_y + 1, is_sel(0), addr(s_disk0));
+    draw_item_row(box_y + 2, is_sel(1), addr(s_disk1));
+}
+
+function disk_select_dialog() {
+    /// modal dialog: Up/Down move, Enter confirms; stores BUS_DEV_DISK0 / BUS_DEV_DISK1 into chosen_disk
+    tui_str(0, 2, addr(s_select_boot_disk), TEXT_FG, TEXT_BG);
+    box_x = (text_cols - DIALOG_BOX_W) / 2;
+    /// box height is 4: top border, two items, bottom border
+    box_y = (text_rows - 4) / 2;
+    selection = 0;
+    loop {
+        dsd_draw();
+        sys_vsync();
+        kbd_poll();
+        /// Up / Down: edge-triggered, only on the press, not while held
+        if (kbd_pressed(kb.KEY_UP) == 1 && selection != 0) {
+            selection--;
+        }
+        if (kbd_pressed(kb.KEY_DOWN) == 1 && selection != 1) {
+            selection++;
+        }
+        if (kbd_pressed(kb.KEY_ENTER) == 1) {
+            if (selection == 0) {
+                chosen_disk = std.BUS_DEV_DISK0;
+            } else {
+                chosen_disk = std.BUS_DEV_DISK1;
+            }
+            return;
+        }
+    }
+}
+
+text_clear();
+/// hide the text cursor - this is a BIOS screen, not a prompt
+text_cursor(0);
+tui_str(0, 0, addr(s_title), TEXT_FG, TEXT_BG);
+/// which disks are attached?
+if (disk_present(std.BUS_DEV_DISK0) != 0) {
+    /// both attached: ask the user; only disk0: boot it
+    if (disk_present(std.BUS_DEV_DISK1) == 0) {
+        chosen_disk = std.BUS_DEV_DISK0;
+    } else {
+        disk_select_dialog();
+    }
+    boot_from_disk();
+} else if (disk_present(std.BUS_DEV_DISK1) != 0) {
+    chosen_disk = std.BUS_DEV_DISK1;
+    boot_from_disk();
+} else {
+    /// neither disk attached
+    tui_str(0, 1, addr(s_disk_not_connected), TEXT_FG, TEXT_BG);
+}
+/// only reached if there is no disk or the chosen disk is not bootable (the message is already printed): idle forever
+sys_idle();
