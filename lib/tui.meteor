@@ -1,0 +1,182 @@
+module tui;
+import "text.obj";
+import "colors.obj";
+import "math.obj";
+
+/// Text mode user interface building blocks (Turbo Vision style): filled rectangles, frames,
+/// windows with drop shadows, centered text, buttons, progress bars. Everything draws straight
+/// to the text device at absolute cell positions; nothing here touches the text_x / text_y cursor.
+/// Colours are 0xAABBGGRR values - a colour with a smaller alpha is blended with what is below.
+
+const TUI_FRAME_SINGLE = 0;
+const TUI_FRAME_DOUBLE = 1;
+const TUI_SHADE_LIGHT = 9617;
+const TUI_SHADE = 9618;
+const TUI_SHADE_DARK = 9619;
+const TUI_BLOCK = 9608;
+
+/// w x h cells of the character ch
+function tui_fill(x: u32, y: u32, w: u32, h: u32, ch: u32, fg: u32, bg: u32) {
+    let row: u32;
+    let col: u32;
+
+    if (w == 0 || h == 0) {
+        return;
+    }
+    /// codepoint and colours stay the same for the whole rectangle: stage them once
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_CODEPOINT, ch);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_FG, fg);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_BG, bg);
+    for (row of y .. y + h) {
+        out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, row);
+        for (col of x .. x + w) {
+            out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, col);
+            out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CHAR, 0);
+        }
+    }
+}
+
+/// fills the whole screen with blanks of the given colours
+function tui_clear(fg: u32, bg: u32) {
+    tui_fill(0, 0, text_cols, text_rows, 32, fg, bg);
+}
+
+/// zero terminated string at (x, y)
+function tui_str(x: u32, y: u32, s: u32, fg: u32, bg: u32) {
+    let c: u32;
+
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, y);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_FG, fg);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_BG, bg);
+    c = u32(peek(s, u8));
+    while (c != 0) {
+        out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, x);
+        out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_CODEPOINT, c);
+        out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CHAR, 0);
+        x++;
+        s++;
+        c = u32(peek(s, u8));
+    }
+}
+
+/// string centered inside the columns x .. x + w - 1
+function tui_str_center(x: u32, w: u32, y: u32, s: u32, fg: u32, bg: u32) {
+    let n: u32;
+
+    n = 0;
+    while (peek(s + n, u8) != 0) {
+        n++;
+    }
+    if (n >= w) {
+        tui_str(x, y, s, fg, bg);
+    } else {
+        tui_str(x + (w - n) / 2, y, s, fg, bg);
+    }
+}
+
+/// number at (x, y), right aligned in `width` characters (padded with spaces)
+function tui_int(x: u32, y: u32, v: i32, width: u32, fg: u32, bg: u32) {
+    text_color(fg, bg);
+    text_goto(x, y);
+    text_print_int_pad(v, width, 32);
+}
+
+/// horizontal line of the character ch
+function tui_hline(x: u32, y: u32, w: u32, ch: u32, fg: u32, bg: u32) {
+    tui_fill(x, y, w, 1, ch, fg, bg);
+}
+
+/// vertical line of the character ch
+function tui_vline(x: u32, y: u32, h: u32, ch: u32, fg: u32, bg: u32) {
+    tui_fill(x, y, 1, h, ch, fg, bg);
+}
+
+/// border of a w x h rectangle (style TUI_FRAME_SINGLE or TUI_FRAME_DOUBLE), the inside is untouched
+function tui_frame(x: u32, y: u32, w: u32, h: u32, style: u32, fg: u32, bg: u32) {
+    let x2: u32;
+    let y2: u32;
+    let tl: u32;
+    let tr: u32;
+    let bl: u32;
+    let br: u32;
+    let hc: u32;
+    let vc: u32;
+
+    if (w < 2 || h < 2) {
+        return;
+    }
+    if (style == TUI_FRAME_DOUBLE) {
+        tl = 9556;
+        tr = 9559;
+        bl = 9562;
+        br = 9565;
+        hc = 9552;
+        vc = 9553;
+    } else {
+        tl = 9484;
+        tr = 9488;
+        bl = 9492;
+        br = 9496;
+        hc = 9472;
+        vc = 9474;
+    }
+    x2 = x + w - 1;
+    y2 = y + h - 1;
+    tui_hline(x + 1, y, w - 2, hc, fg, bg);
+    tui_hline(x + 1, y2, w - 2, hc, fg, bg);
+    tui_vline(x, y + 1, h - 2, vc, fg, bg);
+    tui_vline(x2, y + 1, h - 2, vc, fg, bg);
+    text_put(x, y, tl, fg, bg);
+    text_put(x2, y, tr, fg, bg);
+    text_put(x, y2, bl, fg, bg);
+    text_put(x2, y2, br, fg, bg);
+}
+
+/// frame plus a filled inside
+function tui_box(x: u32, y: u32, w: u32, h: u32, style: u32, fg: u32, bg: u32) {
+    if (w > 2 && h > 2) {
+        tui_fill(x + 1, y + 1, w - 2, h - 2, 32, fg, bg);
+    }
+    tui_frame(x, y, w, h, style, fg, bg);
+}
+
+/// bottom-right drop shadow of a w x h rectangle
+function tui_shadow(x: u32, y: u32, w: u32, h: u32) {
+    tui_fill(x + 1, y + h, w, 1, TUI_SHADE_LIGHT, 0xFF404040, COLOR_BLACK);
+    tui_fill(x + w, y + 1, 1, h, TUI_SHADE_LIGHT, 0xFF404040, COLOR_BLACK);
+}
+
+/// a double framed window with a centered title and a drop shadow
+function tui_window(x: u32, y: u32, w: u32, h: u32, title: u32, fg: u32, bg: u32, title_fg: u32) {
+    tui_box(x, y, w, h, TUI_FRAME_DOUBLE, fg, bg);
+    tui_str_center(x, w, y, title, title_fg, bg);
+    tui_shadow(x, y, w, h);
+}
+
+/// "[ label ]" button of `w` cells; `hot` = 1 inverts the colours (mouse over it / selected)
+function tui_button(x: u32, y: u32, w: u32, label: u32, hot: u32, fg: u32, bg: u32) {
+    if (hot == 1) {
+        tui_fill(x, y, w, 1, 32, bg, fg);
+        tui_str_center(x, w, y, label, bg, fg);
+    } else {
+        tui_fill(x, y, w, 1, 32, fg, bg);
+        tui_str_center(x, w, y, label, fg, bg);
+    }
+}
+
+/// progress bar of `w` cells showing value / max
+function tui_progress(x: u32, y: u32, w: u32, value: u32, max: u32, fg: u32, bg: u32) {
+    let n: u32;
+
+    n = 0;
+    if (max > 0) {
+        n = w * math_umin(value, max) / max;
+    }
+    tui_fill(x, y, n, 1, TUI_BLOCK, fg, bg);
+    tui_fill(x + n, y, w - n, 1, TUI_SHADE_LIGHT, fg, bg);
+}
+
+/// text mode mouse cursor: a translucent block over the cell (x, y)
+function tui_cursor(x: u32, y: u32) {
+    text_put(x, y, TUI_BLOCK, 0x77FFFFFF, 0x77FFFFFF);
+}

@@ -1,0 +1,90 @@
+module sys;
+include "../inc/std.quartz";
+
+/// Machine level helpers: frame pacing, timers, device presence.
+
+/// yield until the next host frame (one frame = one pass of the main loop)
+function sys_vsync() {
+    out(std.BUS_DEV_VIDEO, std.VIDEO_CMD_VSYNC, 0);
+}
+
+/// keep the window alive forever (the classic end of a demo)
+function sys_idle() {
+    loop {
+        sys_vsync();
+    }
+}
+
+/// waits n frames
+function sys_wait_frames(n: u32) {
+    while (n > 0) {
+        sys_vsync();
+        n--;
+    }
+}
+
+/// busy wait in microseconds (the VM's own timer, no frame yield)
+function sys_delay_us(us: u32) {
+    wait(us);
+}
+
+/// The number of frames since the VM started: it grows by one with every vsync (60 per second at 60 fps, but the
+/// frame rate can be changed, so this is NOT a time - use sys_millis() for that).
+function sys_ticks(): u32 {
+    return sys("tick");
+}
+
+/// the wall clock in milliseconds since 1970-01-01 (64 bits)
+function sys_time(): u64 {
+    return sys("time");
+}
+
+/// Milliseconds from the wall clock, as a u32 that wraps around every 49.7 days: subtract two of them to measure
+/// a time (t = sys_millis() - start works across the wrap, too). It goes at the real speed, whatever the frame rate.
+function sys_millis(): u32 {
+    return u32(sys("time"));
+}
+
+/// size of the RAM in bytes
+function sys_ram_size(): u32 {
+    return sys("ramsize");
+}
+
+/// 1 when the device (std.BUS_DEV_*) is attached and ready
+function sys_dev_ready(dev: u32): u32 {
+    return u32(bus_status(dev));
+}
+
+/// the VM bell (a short system beep)
+function sys_beep() {
+    bell();
+}
+
+/// wipe both the pixel framebuffer and the text terminal
+function sys_clear_all() {
+    out(std.BUS_DEV_VIDEO, std.VIDEO_CMD_CLEAR, 0);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CLEAR, 0);
+}
+
+/// switch the video mode: 1 = 640x480 (80x30 characters), 2 = 1024x768 (128x48), 3 = 1280x960 (160x60).
+/// The mode has to be a constant in the video statement, hence the switch. After a change call
+/// gfx_init() / text_init() so the libraries learn the new screen size (gfx_set_mode / text_set_mode
+/// do both steps).
+function sys_video(mode: u32) {
+    switch (mode) {
+        case 2: {
+            video(mode: 2, fps: 60, scale: 1.0, cursor: 1);
+        }
+        case 3: {
+            video(mode: 3, fps: 60, scale: 1.0, cursor: 1);
+        }
+        default: {
+            video(mode: 1, fps: 60, scale: 1.0, cursor: 1);
+        }
+    }
+}
+
+/// cold restart of the VM (the program starts again from the beginning)
+function sys_reboot() {
+    asm ["reset"];
+}

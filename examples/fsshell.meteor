@@ -1,0 +1,843 @@
+program "fsshell - a disk shell: partition tables (PART), formatting (FORMAT), the consistency check (FSCK), mount points (MOUNT, UMOUNT, AUTOMOUNT) and the file commands of a DOS / Unix prompt (DIR CD MD RD DEL REN COPY TYPE ECHO TOUCH ATTRIB VOL LABEL). Type HELP. Start it with a disk image, e.g.  ./run fsshell --disk0 disk.img  (an empty one: python3 tools/fstool.py mkimage disk.img 4096), then:  PART INIT, PART ADD 2000, PART ADD 2000, FORMAT 0 My system, MOUNT 0 sys, ... (lib/part, lib/fs, lib/fsck, lib/console)";
+import "../lib/console.obj";
+import "../lib/fsck.obj";
+import "../lib/rtc.obj";
+/// the console (24 KB), the file system (5 KB) and the checker (11 KB) need more than the default 32 KB
+ram(size: 131072);
+
+const LINE_MAX = 98;
+const FG = 0xFFFFFFFF;
+const MAX_ARGS = 6;
+
+let line: u8[100];
+let raw: u8[100];
+let cmd: u8[16];
+let sub: u8[16];
+let args: u32[MAX_ARGS];
+let arg_off: u32[MAX_ARGS];
+let argc: u32;
+let disk_no: u32;
+let tmp: u8[24];
+let row: u8[64];
+let copy_buf: u8[256];
+let s_banner: u8[] = "METEOR DISK SHELL - type HELP";
+let s_prompt_end: u8[] = ">";
+let s_unknown: u8[] = "Unknown command";
+let s_error: u8[] = "Error: ";
+let s_nodisk: u8[] = "No disk. Start the VM with --disk0 <image>";
+let s_syntax: u8[] = "Missing or bad argument";
+let s_help: u8[] = "DISK [n]                 select the disk 0 or 1 for the commands below\nPART                     the partition table of the disk\nPART INIT                create an empty table (all volumes are forgotten)\nPART ADD size [begin]    new volume of `size` sectors (add K for kilobytes)\nPART DEL n [WIPE]        remove volume n from the table\nPART RESIZE n size       change the size of volume n\nFORMAT n label           make a file system on volume n (the label is needed)\nFSCK n [FIX]             check volume n; FIX frees lost clusters\nMOUNT n [name]           put volume n into the tree as /name; MOUNT alone lists them\nUMOUNT name              take a volume out of the tree\nAUTOMOUNT                mount all volumes of the disk under their stored names\nSETMOUNT n [name]        store the preferred mount name in volume n\nLABEL path text          change the label of the volume that path is in\nVOL [path]               volume label, size and free space\nDIR [path]   CD [path]   MD path   RD path   DEL path   REN old new   COPY from to\nTYPE path    TOUCH path   ATTRIB path [+R|-R]   ECHO text [> file | >> file]\nCLS   EXIT";
+let s_dir_hdr: u8[] = " Directory of ";
+let s_files: u8[] = " file(s)  ";
+let s_dirs: u8[] = " dir(s)";
+let s_bytes: u8[] = " bytes";
+let s_sure: u8[] = "All data will be lost! Continue (y/n)? ";
+let s_done: u8[] = "Done.";
+let s_dirtag: u8[] = "<DIR>";
+let s_dirtag_pad: u8[] = "    ";
+let s_ro: u8[] = " read only";
+let s_not_ro: u8[] = "normal";
+let s_ro_only: u8[] = "read only";
+let s_mounted_as: u8[] = "Mounted as /";
+let s_part_hdr: u8[] = "Vol      Begin        End    Sectors       KB  File system";
+let s_part_free: u8[] = "Free sectors: ";
+let s_part_gap: u8[] = "   largest gap: ";
+let s_vol: u8[] = "Volume ";
+let s_disk_lbl: u8[] = "  disk ";
+let s_vol_lbl: u8[] = " volume ";
+let s_clusters: u8[] = " clusters, ";
+let s_free: u8[] = " free (";
+let s_kb: u8[] = " KB)";
+let s_no_mounts: u8[] = "Nothing is mounted. Try AUTOMOUNT or MOUNT n.";
+let s_fsck_ok: u8[] = "The volume is consistent.";
+let s_fsck_bad: u8[] = " problem(s) found:";
+let s_fsck_sum: u8[] = "files, directories, clusters used, free, lost, freed: ";
+let s_mount_n: u8[] = " volume(s) mounted";
+let s_part_added: u8[] = "Added volume ";
+let s_cur_disk: u8[] = "Disk ";
+let s_unformatted: u8[] = "no file system";
+let s_dotdir: u8[] = ".";
+let s_empty: u8[] = "";
+let s_sp2: u8[] = "  ";
+let s_sectors_txt: u8[] = " sectors, ";
+let s_not_att: u8[] = " - no disk attached";
+let s_colon: u8[] = ": ";
+let s_kb_plain: u8[] = " KB";
+let s_c_help: u8[] = "HELP";
+let s_c_disk: u8[] = "DISK";
+let s_c_part: u8[] = "PART";
+let s_c_format: u8[] = "FORMAT";
+let s_c_fsck: u8[] = "FSCK";
+let s_c_mount: u8[] = "MOUNT";
+let s_c_umount: u8[] = "UMOUNT";
+let s_c_automount: u8[] = "AUTOMOUNT";
+let s_c_setmount: u8[] = "SETMOUNT";
+let s_c_label: u8[] = "LABEL";
+let s_c_vol: u8[] = "VOL";
+let s_c_dir: u8[] = "DIR";
+let s_c_ls: u8[] = "LS";
+let s_c_cd: u8[] = "CD";
+let s_c_md: u8[] = "MD";
+let s_c_mkdir: u8[] = "MKDIR";
+let s_c_rd: u8[] = "RD";
+let s_c_rmdir: u8[] = "RMDIR";
+let s_c_del: u8[] = "DEL";
+let s_c_rm: u8[] = "RM";
+let s_c_ren: u8[] = "REN";
+let s_c_mv: u8[] = "MV";
+let s_c_copy: u8[] = "COPY";
+let s_c_cp: u8[] = "CP";
+let s_c_type: u8[] = "TYPE";
+let s_c_cat: u8[] = "CAT";
+let s_c_echo: u8[] = "ECHO";
+let s_c_touch: u8[] = "TOUCH";
+let s_c_attrib: u8[] = "ATTRIB";
+let s_c_cls: u8[] = "CLS";
+let s_c_exit: u8[] = "EXIT";
+let s_init: u8[] = "INIT";
+let s_add: u8[] = "ADD";
+let s_del: u8[] = "DEL";
+let s_resize: u8[] = "RESIZE";
+let s_wipe: u8[] = "WIPE";
+let s_fix: u8[] = "FIX";
+let s_plus_r: u8[] = "+R";
+let s_minus_r: u8[] = "-R";
+
+function disk_dev(): u32 {
+    if (disk_no == 1) {
+        return std.BUS_DEV_DISK1;
+    }
+    return std.BUS_DEV_DISK0;
+}
+
+/// prints the reason of the last failure of a fs_* function
+function report() {
+    console_color(COLOR_RED, COLOR_BLACK);
+    console_print(addr(s_error));
+    if (fs_error == FS_ERR_PART) {
+        console_println(part_text(part_error));
+    } else {
+        console_println(fs_error_text(fs_error));
+    }
+    console_color(FG, COLOR_BLACK);
+}
+
+/// the same for a part_* function
+function report_part() {
+    console_color(COLOR_RED, COLOR_BLACK);
+    console_print(addr(s_error));
+    console_println(part_text(part_error));
+    console_color(FG, COLOR_BLACK);
+}
+
+/// 1 when the word `name` is the command (case insensitive)
+function is_cmd(name: u32): u32 {
+    return str_eq(addr(cmd), name);
+}
+
+function is_sub(name: u32): u32 {
+    return str_eq(addr(sub), name);
+}
+
+/// 1 when the argument i exists and starts with a digit
+function is_num(i: u32): u32 {
+    if (i < argc && str_is_digit(u32(peek(args[i], u8))) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+/// the argument i as a number of sectors; a trailing K or k means kilobytes (2 sectors each)
+function sectors_of(i: u32): u32 {
+    let v: u32;
+    let n: u32;
+    let c: u32;
+
+    v = u32(str_atoi(args[i]));
+    n = str_len(args[i]);
+    c = u32(peek(args[i] + n - 1, u8));
+    if (c == 75 || c == 107) {
+        v = v * 2;
+    }
+    return v;
+}
+
+/// the text of the command line from the argument i on, trailing blanks removed (labels contain blanks)
+function rest_from(i: u32): u32 {
+    let p: u32;
+    let n: u32;
+
+    p = addr(raw) + arg_off[i];
+    n = str_len(p);
+    while (n > 0 && peek(p + n - 1, u8) == 32) {
+        n--;
+        poke(p + n, u8, 0);
+    }
+    return p;
+}
+
+/// splits `line` into words (zero terminated in place); arg_off[i] is the position of word i in raw
+function split() {
+    let p: u32;
+    let c: u32;
+
+    argc = 0;
+    p = addr(line);
+    loop {
+        c = u32(peek(p, u8));
+        while (c == 32) {
+            p++;
+            c = u32(peek(p, u8));
+        }
+        if (c == 0 || argc >= MAX_ARGS) {
+            break;
+        }
+        args[argc] = p;
+        arg_off[argc] = p - addr(line);
+        argc++;
+        while (c != 0 && c != 32) {
+            p++;
+            c = u32(peek(p, u8));
+        }
+        if (c == 0) {
+            break;
+        }
+        poke(p, u8, 0);
+        p++;
+    }
+}
+
+/// number right aligned in w characters
+function print_num(v: u32, w: u32) {
+    let n: u32;
+
+    n = str_utoa(v, addr(tmp));
+    while (n < w) {
+        console_putc(32);
+        n++;
+    }
+    console_print(addr(tmp));
+}
+
+function ask(): u32 {
+    console_print(addr(s_sure));
+    console_readline(addr(row), 4);
+    if (row[0] == 'y' || row[0] == 'Y') {
+        return 1;
+    }
+    return 0;
+}
+
+/// ---------------------------------------------------------------- partitions
+
+function cmd_part_list() {
+    let i: u32;
+    let b: u32;
+    let e: u32;
+    let sz: u32;
+    let magic: u32;
+
+    if (part_load(disk_dev()) == 0) {
+        report_part();
+        return;
+    }
+    console_print(addr(s_cur_disk));
+    console_print_uint(disk_no);
+    console_print(addr(s_colon));
+    console_print_uint(disk_sectors(disk_dev()));
+    console_print(addr(s_sectors_txt));
+    console_print_uint(disk_sectors(disk_dev()) / 2);
+    console_println(addr(s_kb_plain));
+    console_println(addr(s_part_hdr));
+    for (i of 0 .. PART_MAX) {
+        if (part_entry(i) == 1) {
+            b = part_begin;
+            e = part_end;
+            sz = part_size;
+            print_num(i, 3);
+            print_num(b, 10);
+            print_num(e, 11);
+            print_num(sz, 11);
+            print_num(sz / 2, 9);
+            console_print(addr(s_sp2));
+            magic = part_probe_magic(disk_dev(), i);
+            console_print(part_fs_name(magic));
+            if (magic == FS_MAGIC && fs_read_header(disk_dev(), i) == 1) {
+                console_putc(32);
+                console_putc(34);
+                console_print(addr(fs_sec) + FS_H_LABEL);
+                console_putc(34);
+            }
+            console_putc(10);
+        }
+    }
+    part_load(disk_dev());
+    console_print(addr(s_part_free));
+    console_print_uint(part_free_sectors());
+    console_print(addr(s_part_gap));
+    console_print_uint(part_largest_gap());
+    console_putc(10);
+}
+
+function cmd_part() {
+    let v: i32;
+    let n: u32;
+
+    if (argc < 2) {
+        cmd_part_list();
+        return;
+    }
+    str_copy(addr(sub), args[1]);
+    str_upper(addr(sub));
+    if (is_sub(addr(s_init)) == 1) {
+        if (ask() == 1) {
+            if (part_init(disk_dev()) == 0) {
+                report_part();
+            } else {
+                console_println(addr(s_done));
+            }
+        }
+    } else if (is_sub(addr(s_add)) == 1) {
+        if (is_num(2) == 0) {
+            console_println(addr(s_syntax));
+            return;
+        }
+        n = sectors_of(2);
+        if (is_num(3) == 1) {
+            v = part_add(disk_dev(), u32(str_atoi(args[3])), u32(str_atoi(args[3])) + n - 1);
+        } else {
+            v = part_add_size(disk_dev(), n);
+        }
+        if (v < 0) {
+            report_part();
+        } else {
+            console_print(addr(s_part_added));
+            console_print_int(v);
+            console_putc(10);
+        }
+    } else if (is_sub(addr(s_del)) == 1) {
+        if (is_num(2) == 0) {
+            console_println(addr(s_syntax));
+            return;
+        }
+        n = 0;
+        if (argc > 3) {
+            str_upper(args[3]);
+            if (str_eq(args[3], addr(s_wipe)) == 1) {
+                n = 1;
+            }
+        }
+        if (fs_volume_delete(disk_dev(), u32(str_atoi(args[2])), n) == 0) {
+            report();
+        }
+    } else if (is_sub(addr(s_resize)) == 1) {
+        if (is_num(2) == 0 || is_num(3) == 0) {
+            console_println(addr(s_syntax));
+            return;
+        }
+        if (part_get(disk_dev(), u32(str_atoi(args[2]))) == 0) {
+            report_part();
+            return;
+        }
+        if (fs_volume_resize(disk_dev(), u32(str_atoi(args[2])), part_begin + sectors_of(3) - 1) == 0) {
+            report();
+        }
+    } else {
+        console_println(addr(s_syntax));
+    }
+}
+
+/// ---------------------------------------------------------------- volumes
+
+function cmd_mount_list() {
+    let i: u32;
+    let n: u32;
+    let k: u32;
+
+    n = 0;
+    for (i of 0 .. FS_MAX_MOUNTS) {
+        if (fs_mount_get(i) == 1) {
+            console_putc(47);
+            console_print(addr(fs_mi_name));
+            for (k of str_len(addr(fs_mi_name)) .. 12) {
+                console_putc(32);
+            }
+            console_print(addr(s_disk_lbl));
+            console_print_uint(fs_mi_dev - std.BUS_DEV_DISK0);
+            console_print(addr(s_vol_lbl));
+            console_print_uint(fs_mi_vol);
+            console_print(addr(s_sp2));
+            console_putc(34);
+            console_print(addr(fs_mi_label));
+            console_putc(34);
+            console_putc(10);
+            n++;
+        }
+    }
+    if (n == 0) {
+        console_println(addr(s_no_mounts));
+    }
+}
+
+function cmd_vol() {
+    let path: u32;
+
+    path = addr(s_dotdir);
+    if (argc > 1) {
+        path = args[1];
+    }
+    if (fs_vol_info(path) == 0) {
+        report();
+        return;
+    }
+    console_print(addr(s_vol));
+    console_putc(34);
+    console_print(addr(fs_mi_label));
+    console_putc(34);
+    console_print(addr(s_disk_lbl));
+    console_print_uint(fs_mi_dev - std.BUS_DEV_DISK0);
+    console_print(addr(s_vol_lbl));
+    console_print_uint(fs_mi_vol);
+    console_print(addr(s_sp2));
+    console_putc(47);
+    console_println(addr(fs_mi_name));
+    print_num(fs_mi_clusters, 1);
+    console_print(addr(s_clusters));
+    print_num(fs_mi_free, 1);
+    console_print(addr(s_free));
+    print_num(fs_mi_free / 2, 1);
+    console_println(addr(s_kb));
+}
+
+function cmd_format() {
+    if (is_num(1) == 0 || argc < 3) {
+        console_println(addr(s_syntax));
+        return;
+    }
+    if (ask() == 0) {
+        return;
+    }
+    if (fs_format(disk_dev(), u32(str_atoi(args[1])), rest_from(2)) == 0) {
+        report();
+        return;
+    }
+    console_println(addr(s_done));
+}
+
+function cmd_fsck() {
+    let r: i32;
+    let fix: u32;
+
+    if (is_num(1) == 0) {
+        console_println(addr(s_syntax));
+        return;
+    }
+    fix = 0;
+    if (argc > 2) {
+        str_upper(args[2]);
+        if (str_eq(args[2], addr(s_fix)) == 1) {
+            fix = 1;
+        }
+    }
+    r = fsck_run(disk_dev(), u32(str_atoi(args[1])), fix);
+    if (r < 0) {
+        report();
+        return;
+    }
+    if (r == 0) {
+        console_color(COLOR_GREEN, COLOR_BLACK);
+        console_println(addr(s_fsck_ok));
+        console_color(FG, COLOR_BLACK);
+    } else {
+        console_color(COLOR_YELLOW, COLOR_BLACK);
+        console_print_int(r);
+        console_println(addr(s_fsck_bad));
+        console_color(FG, COLOR_BLACK);
+        console_print(addr(fsck_log));
+    }
+    console_print(addr(s_fsck_sum));
+    console_print_uint(fsck_files);
+    console_putc(32);
+    console_print_uint(fsck_dirs);
+    console_putc(32);
+    console_print_uint(fsck_used);
+    console_putc(32);
+    console_print_uint(fsck_free);
+    console_putc(32);
+    console_print_uint(fsck_lost);
+    console_putc(32);
+    console_print_uint(fsck_fixed);
+    console_putc(10);
+}
+
+function cmd_mount() {
+    let name: u32;
+
+    if (argc < 2) {
+        cmd_mount_list();
+        return;
+    }
+    if (is_num(1) == 0) {
+        console_println(addr(s_syntax));
+        return;
+    }
+    name = addr(s_empty);
+    if (argc > 2) {
+        name = args[2];
+    }
+    if (fs_mount(disk_dev(), u32(str_atoi(args[1])), name) == 0) {
+        report();
+        return;
+    }
+    /// the volume that was mounted last
+    cmd_mount_list();
+}
+
+/// ---------------------------------------------------------------- files
+
+/// the entry in fs_ent_* as a line of the directory listing
+function print_entry() {
+    let n: u32;
+
+    n = str_copy(addr(row), addr(fs_ent_name));
+    while (n < 14) {
+        row[n] = 32;
+        n++;
+    }
+    row[n] = 0;
+    console_print(addr(row));
+    if ((fs_ent_attr & FS_ATTR_DIR) != 0) {
+        console_color(COLOR_CYAN, COLOR_BLACK);
+        console_print(addr(s_dirtag));
+        console_color(FG, COLOR_BLACK);
+        console_print(addr(s_dirtag_pad));
+    } else {
+        print_num(fs_ent_size, 9);
+    }
+    console_putc(32);
+    console_putc(32);
+    if (fs_ent_date != 0) {
+        fs_format_date(fs_ent_date, addr(tmp));
+        console_print(addr(tmp));
+        console_putc(32);
+        fs_format_time(fs_ent_time, addr(tmp));
+        console_print(addr(tmp));
+    }
+    if ((fs_ent_attr & FS_ATTR_READONLY) != 0) {
+        console_print(addr(s_ro));
+    }
+    console_putc(10);
+}
+
+function cmd_dir() {
+    let files: u32;
+    let dirs: u32;
+    let bytes: u32;
+    let path: u32;
+
+    path = addr(s_dotdir);
+    if (argc > 1) {
+        path = args[1];
+    }
+    if (fs_list_begin(path) == 0) {
+        report();
+        return;
+    }
+    console_print(addr(s_dir_hdr));
+    console_println(fs_abspath(path));
+    files = 0;
+    dirs = 0;
+    bytes = 0;
+    while (fs_list_next() == 1) {
+        print_entry();
+        if ((fs_ent_attr & FS_ATTR_DIR) != 0) {
+            dirs++;
+        } else {
+            files++;
+            bytes = bytes + fs_ent_size;
+        }
+    }
+    print_num(files, 5);
+    console_print(addr(s_files));
+    print_num(bytes, 1);
+    console_println(addr(s_bytes));
+    print_num(dirs, 5);
+    console_println(addr(s_dirs));
+}
+
+function cmd_type() {
+    let h: i32;
+    let n: i32;
+    let k: i32;
+    let c: u32;
+
+    h = fs_open(args[1], FS_READ);
+    if (h < 0) {
+        report();
+        return;
+    }
+    loop {
+        n = fs_read(u32(h), addr(copy_buf), 128);
+        if (n <= 0) {
+            break;
+        }
+        for (k of 0 .. n) {
+            c = u32(copy_buf[k]);
+            if (c == 10) {
+                console_putc(10);
+            } else if (c >= 32 && c < 127) {
+                console_putc(c);
+            } else if (c != 13) {
+                console_putc(46);
+            }
+        }
+    }
+    fs_close(u32(h));
+    console_putc(10);
+}
+
+function cmd_copy() {
+    let src: i32;
+    let dst: i32;
+    let n: i32;
+
+    src = fs_open(args[1], FS_READ);
+    if (src < 0) {
+        report();
+        return;
+    }
+    dst = fs_open(args[2], FS_WRITE);
+    if (dst < 0) {
+        report();
+        fs_close(u32(src));
+        return;
+    }
+    loop {
+        n = fs_read(u32(src), addr(copy_buf), 256);
+        if (n <= 0) {
+            break;
+        }
+        if (fs_write(u32(dst), addr(copy_buf), u32(n)) != n) {
+            report();
+            break;
+        }
+    }
+    fs_close(u32(src));
+    fs_close(u32(dst));
+}
+
+/// ECHO text, ECHO text > file, ECHO text >> file
+function cmd_echo() {
+    let found: i32;
+    let mode: u32;
+    let text: u32;
+    let file: u32;
+    let n: u32;
+    let h: i32;
+
+    text = addr(raw) + 4;
+    if (peek(text, u8) == 32) {
+        text++;
+    }
+    found = str_find_c(text, '>');
+    if (found < 0) {
+        console_println(text);
+        return;
+    }
+    mode = FS_WRITE;
+    file = text + u32(found) + 1;
+    if (peek(file, u8) == '>') {
+        mode = FS_APPEND;
+        file++;
+    }
+    while (peek(file, u8) == 32) {
+        file++;
+    }
+    poke(text + u32(found), u8, 0);
+    n = str_len(text);
+    while (n > 0 && peek(text + n - 1, u8) == 32) {
+        n--;
+        poke(text + n, u8, 0);
+    }
+    if (peek(file, u8) == 0) {
+        console_println(addr(s_syntax));
+        return;
+    }
+    h = fs_open(file, mode);
+    if (h < 0) {
+        report();
+        return;
+    }
+    fs_write(u32(h), text, n);
+    poke(addr(tmp), u8, 10);
+    fs_write(u32(h), addr(tmp), 1);
+    if (fs_close(u32(h)) == 0) {
+        report();
+    }
+}
+
+function cmd_attrib() {
+    if (fs_stat(args[1]) == 0) {
+        report();
+        return;
+    }
+    if (argc > 2) {
+        str_upper(args[2]);
+        if (str_eq(args[2], addr(s_plus_r)) == 1) {
+            fs_set_attr(args[1], fs_ent_attr | FS_ATTR_READONLY);
+        } else if (str_eq(args[2], addr(s_minus_r)) == 1) {
+            fs_set_attr(args[1], fs_ent_attr & 0xFE);
+        }
+        if (fs_error != 0) {
+            report();
+            return;
+        }
+        fs_stat(args[1]);
+    }
+    if ((fs_ent_attr & FS_ATTR_READONLY) != 0) {
+        console_println(addr(s_ro_only));
+    } else {
+        console_println(addr(s_not_ro));
+    }
+}
+
+/// ---------------------------------------------------------------- the command line
+
+/// the commands that need no mounted volume: disks and partitions
+function run_disk_command(): u32 {
+    if (is_cmd(addr(s_c_disk)) == 1) {
+        if (is_num(1) == 1) {
+            disk_no = u32(str_atoi(args[1])) & 1;
+        }
+        console_print(addr(s_cur_disk));
+        console_print_uint(disk_no);
+        if (disk_present(disk_dev()) == 0) {
+            console_print(addr(s_not_att));
+        }
+        console_putc(10);
+        return 1;
+    }
+    if (is_cmd(addr(s_c_part)) == 1) {
+        cmd_part();
+        return 1;
+    }
+    if (is_cmd(addr(s_c_format)) == 1) {
+        cmd_format();
+        return 1;
+    }
+    if (is_cmd(addr(s_c_fsck)) == 1) {
+        cmd_fsck();
+        return 1;
+    }
+    if (is_cmd(addr(s_c_mount)) == 1) {
+        cmd_mount();
+        return 1;
+    }
+    if (is_cmd(addr(s_c_umount)) == 1) {
+        if (argc < 2) {
+            console_println(addr(s_syntax));
+        } else if (fs_umount(args[1]) == 0) {
+            report();
+        }
+        return 1;
+    }
+    if (is_cmd(addr(s_c_automount)) == 1) {
+        print_num(fs_automount(disk_dev()), 1);
+        console_println(addr(s_mount_n));
+        return 1;
+    }
+    if (is_cmd(addr(s_c_setmount)) == 1) {
+        if (is_num(1) == 0) {
+            console_println(addr(s_syntax));
+        } else if (argc > 2 && fs_set_mountname(disk_dev(), u32(str_atoi(args[1])), args[2]) == 0) {
+            report();
+        } else if (argc < 3 && fs_set_mountname(disk_dev(), u32(str_atoi(args[1])), addr(s_empty)) == 0) {
+            report();
+        }
+        return 1;
+    }
+    return 0;
+}
+
+function run_command() {
+    str_copy(addr(raw), addr(line));
+    split();
+    if (argc == 0) {
+        return;
+    }
+    str_copy(addr(cmd), args[0]);
+    str_upper(addr(cmd));
+    if (is_cmd(addr(s_c_help)) == 1) {
+        console_println(addr(s_help));
+    } else if (is_cmd(addr(s_c_exit)) == 1) {
+        halt;
+    } else if (is_cmd(addr(s_c_cls)) == 1) {
+        console_clear();
+    } else if (run_disk_command() == 1) {
+        return;
+    } else if (is_cmd(addr(s_c_dir)) == 1 || is_cmd(addr(s_c_ls)) == 1) {
+        cmd_dir();
+    } else if (is_cmd(addr(s_c_cd)) == 1) {
+        if (argc < 2) {
+            console_println(fs_getcwd());
+        } else if (fs_chdir(args[1]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_echo)) == 1) {
+        cmd_echo();
+    } else if (is_cmd(addr(s_c_vol)) == 1) {
+        cmd_vol();
+    } else if (argc < 2) {
+        console_println(addr(s_syntax));
+    } else if (is_cmd(addr(s_c_label)) == 1) {
+        if (argc < 3) {
+            console_println(addr(s_syntax));
+        } else if (fs_set_label(args[1], rest_from(2)) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_md)) == 1 || is_cmd(addr(s_c_mkdir)) == 1) {
+        if (fs_mkdir(args[1]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_rd)) == 1 || is_cmd(addr(s_c_rmdir)) == 1) {
+        if (fs_rmdir(args[1]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_del)) == 1 || is_cmd(addr(s_c_rm)) == 1) {
+        if (fs_remove(args[1]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_type)) == 1 || is_cmd(addr(s_c_cat)) == 1) {
+        cmd_type();
+    } else if (is_cmd(addr(s_c_touch)) == 1) {
+        if (fs_touch(args[1]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_attrib)) == 1) {
+        cmd_attrib();
+    } else if (argc < 3) {
+        console_println(addr(s_syntax));
+    } else if (is_cmd(addr(s_c_ren)) == 1 || is_cmd(addr(s_c_mv)) == 1) {
+        if (fs_rename(args[1], args[2]) == 0) {
+            report();
+        }
+    } else if (is_cmd(addr(s_c_copy)) == 1 || is_cmd(addr(s_c_cp)) == 1) {
+        cmd_copy();
+    } else {
+        console_println(addr(s_unknown));
+    }
+}
+
+console_init();
+console_println(addr(s_banner));
+if (disk_present(std.BUS_DEV_DISK0) == 0) {
+    console_println(addr(s_nodisk));
+} else if (fs_automount(std.BUS_DEV_DISK0) > 0) {
+    cmd_mount_list();
+}
+loop {
+    console_print(fs_getcwd());
+    console_print(addr(s_prompt_end));
+    console_readline(addr(line), LINE_MAX);
+    run_command();
+}

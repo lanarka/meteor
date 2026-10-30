@@ -1,0 +1,10 @@
+program "Generate an 8-bit WAV square wave in RAM and play it (lib/audio builds the WAV and checks the audio device)";
+import "../lib/audio.obj";
+import "../lib/sys.obj";
+
+/// 250 ms of a 444 Hz square wave
+audio_vol = 100;
+audio_reset();
+audio_tone(444, 250, AUDIO_SQUARE);
+audio_play();
+sys_idle();

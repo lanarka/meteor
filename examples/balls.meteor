@@ -1,0 +1,74 @@
+program "balls - 12 coloured balls bouncing in a box with gravity. Positions and speeds are fixed point numbers (1/16 pixel) because the VM computes with integers faster than with floats. Click the left mouse button to kick all balls into the air; Esc quits. (lib/gfx, lib/colors, lib/math, lib/input)";
+import "../lib/gfx.obj";
+import "../lib/input.obj";
+
+const BALLS = 12;
+const RADIUS = 12;
+const GRAVITY = 5;
+const FLOOR = 470;
+/// the unit of the fixed point numbers: 16 = one pixel
+const ONE = 16;
+
+let x: i32[BALLS];
+let y: i32[BALLS];
+let vx: i32[BALLS];
+let vy: i32[BALLS];
+let i: u32;
+
+function kick() {
+    let k: u32;
+
+    for (k of 0 .. BALLS) {
+        vx[k] = math_rand(-60, 60);
+        vy[k] = -math_rand(150, 330);
+    }
+}
+
+for (i of 0 .. BALLS) {
+    x[i] = math_rand(RADIUS + 10, 630 - RADIUS) * ONE;
+    y[i] = math_rand(20, 200) * ONE;
+    vx[i] = math_rand(-50, 50);
+    vy[i] = 0;
+}
+mouse_mode(0);
+loop {
+    kbd_poll();
+    mouse_poll();
+    if (kbd_down(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    if (mouse_clicked() == 1) {
+        kick();
+    }
+    gfx_gradient_bands(0, 0, 640, 480, 0xFF301808, 0xFF080400, 48);
+    /// the floor
+    gfx_fill_rect(0, FLOOR, 640, 10, COLOR_DARK_GRAY);
+    for (i of 0 .. BALLS) {
+        vy[i] = vy[i] + GRAVITY;
+        x[i] = x[i] + vx[i];
+        y[i] = y[i] + vy[i];
+        /// walls and floor: reflect and lose a little energy
+        if (x[i] < RADIUS * ONE) {
+            x[i] = RADIUS * ONE;
+            vx[i] = -vx[i];
+        }
+        if (x[i] > (640 - RADIUS) * ONE) {
+            x[i] = (640 - RADIUS) * ONE;
+            vx[i] = -vx[i];
+        }
+        if (y[i] > (FLOOR - RADIUS) * ONE) {
+            y[i] = (FLOOR - RADIUS) * ONE;
+            vy[i] = -vy[i] * 7 / 8;
+            vx[i] = vx[i] * 15 / 16;
+            /// a ball that has almost stopped rests on the floor
+            if (math_abs(vy[i]) < 8) {
+                vy[i] = 0;
+            }
+        }
+        /// shadow on the floor, then the ball with a highlight
+        gfx_fill_rect(x[i] / ONE - RADIUS + 3, FLOOR - 2, RADIUS * 2 - 6, 3, 0xFF000000);
+        gfx_fill_circle(x[i] / ONE, y[i] / ONE, RADIUS, color_hue(i * 21));
+        gfx_fill_circle(x[i] / ONE - 4, y[i] / ONE - 4, 3, color_lighten(color_hue(i * 21), 180));
+    }
+    gfx_vsync();
+}

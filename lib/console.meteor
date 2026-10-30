@@ -1,0 +1,248 @@
+module console;
+import "text.obj";
+import "input.obj";
+import "str.obj";
+import "colors.obj";
+import "math.obj";
+import "sys.obj";
+
+/// A scrolling text console on top of the text device. The characters are also kept in a shadow
+/// buffer (10 bytes per cell, exactly the layout VTXT_CMD_FRAME wants), so scrolling is one memcpy
+/// plus one block transfer. The console works in at most 80 x 30 cells (video mode 1); on a bigger
+/// terminal it uses the top left 80 x 30 corner.
+///
+/// RAM: a 24 KB shadow buffer of the 80 x 30 screen - about 8 KB of the default 32 KB RAM are left for the program.
+
+const CON_MAX_COLS = 80;
+const CON_MAX_ROWS = 30;
+const CON_CELL = 10;
+
+let con_buf: u8[CON_MAX_COLS * CON_MAX_ROWS * CON_CELL];
+let con_cols: u32;
+let con_rows: u32;
+let con_x: u32;
+let con_y: u32;
+let con_fg: u32 = COLOR_WHITE;
+let con_bg: u32 = COLOR_BLACK;
+let con_num: u8[16];
+/// where the hardware cursor was put last (the host redraws the terminal on every CURSET, so it is sent only on change)
+let con_cur_x: u32 = 0xFFFFFFFF;
+let con_cur_y: u32 = 0xFFFFFFFF;
+
+/// (internal) stores one cell in the shadow buffer
+function con_store(x: u32, y: u32, cp: u32, fg: u32, bg: u32) {
+    let p: u32;
+
+    p = addr(con_buf) + (y * con_cols + x) * CON_CELL;
+    poke(p, u16, u16(cp));
+    poke(p + 2, u32, fg);
+    poke(p + 6, u32, bg);
+}
+
+/// (internal) sends the whole shadow buffer to the screen
+function con_draw_all() {
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, 0);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, 0);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_W, con_cols);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_H, con_rows);
+    outb(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_FRAME, addr(con_buf), con_cols * con_rows * CON_CELL);
+}
+
+/// the hardware cursor follows the console cursor (nothing is sent while it stays where it is)
+function console_cursor_sync() {
+    let x: u32;
+
+    x = con_x;
+    if (x >= con_cols) {
+        x = con_cols - 1;
+    }
+    if (x == con_cur_x && con_y == con_cur_y) {
+        return;
+    }
+    con_cur_x = x;
+    con_cur_y = con_y;
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, x);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, con_y);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CURSET, 0);
+}
+
+/// sets the colours of the following output (0xAABBGGRR)
+function console_color(fg: u32, bg: u32) {
+    con_fg = fg;
+    con_bg = bg;
+}
+
+/// clears the console and moves the cursor to the top left corner
+function console_clear() {
+    let i: u32;
+    let j: u32;
+
+    for (j of 0 .. con_rows) {
+        for (i of 0 .. con_cols) {
+            con_store(i, j, 32, con_fg, con_bg);
+        }
+    }
+    con_draw_all();
+    con_x = 0;
+    con_y = 0;
+}
+
+/// clears the screen, sizes the console from the text device and turns the cursor on; call it first
+function console_init() {
+    con_cols = math_umin(text_cols, CON_MAX_COLS);
+    con_rows = math_umin(text_rows, CON_MAX_ROWS);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CLEAR, 0);
+    con_cur_x = 0xFFFFFFFF;
+    console_clear();
+    text_cursor(2);
+    console_cursor_sync();
+}
+
+/// moves the console cursor to the column x and the row y
+function console_goto(x: u32, y: u32) {
+    con_x = x;
+    con_y = y;
+}
+
+/// scroll everything up by one line, the last line becomes empty
+function console_scroll() {
+    let i: u32;
+    let row: u32;
+
+    row = con_cols * CON_CELL;
+    memcpy(addr(con_buf), addr(con_buf) + row, (con_rows - 1) * row);
+    for (i of 0 .. con_cols) {
+        con_store(i, con_rows - 1, 32, con_fg, con_bg);
+    }
+    con_draw_all();
+}
+
+/// moves to the start of the next line, scrolling at the bottom
+function console_newline() {
+    con_x = 0;
+    con_y++;
+    if (con_y >= con_rows) {
+        con_y = con_rows - 1;
+        console_scroll();
+    }
+}
+
+/// prints one character; understands 10 (newline), 13, 9 (tab) and 8 (backspace)
+function console_putc(c: u32) {
+    switch (c) {
+        case 10: {
+            console_newline();
+        }
+        case 13: {
+            con_x = 0;
+        }
+        case 9: {
+            con_x = con_x + 4 - con_x % 4;
+            if (con_x >= con_cols) {
+                console_newline();
+            }
+        }
+        case 8: {
+            /// backspace: back over a line wrap too, then erase the cell
+            if (con_x == 0) {
+                if (con_y > 0) {
+                    con_y--;
+                    con_x = con_cols - 1;
+                }
+            } else {
+                con_x--;
+            }
+            con_store(con_x, con_y, 32, con_fg, con_bg);
+            text_put(con_x, con_y, 32, con_fg, con_bg);
+        }
+        default: {
+            if (con_x >= con_cols) {
+                console_newline();
+            }
+            con_store(con_x, con_y, c, con_fg, con_bg);
+            text_put(con_x, con_y, c, con_fg, con_bg);
+            con_x++;
+        }
+    }
+}
+
+/// prints a zero terminated string
+function console_print(s: u32) {
+    let c: u32;
+
+    c = u32(peek(s, u8));
+    while (c != 0) {
+        console_putc(c);
+        s++;
+        c = u32(peek(s, u8));
+    }
+    console_cursor_sync();
+}
+
+/// prints a zero terminated string and a newline
+function console_println(s: u32) {
+    console_print(s);
+    console_putc(10);
+    console_cursor_sync();
+}
+
+/// prints an unsigned decimal number
+function console_print_uint(v: u32) {
+    str_utoa(v, addr(con_num));
+    console_print(addr(con_num));
+}
+
+/// prints a signed decimal number
+function console_print_int(v: i32) {
+    str_itoa(v, addr(con_num));
+    console_print(addr(con_num));
+}
+
+/// prints 8 hex digits
+function console_print_hex(v: u32) {
+    str_hex(v, 8, addr(con_num));
+    console_print(addr(con_num));
+}
+
+/// Reads a line typed on the keyboard with echo and backspace into buf (at most `max` characters
+/// plus the terminating zero), returns when Enter is pressed. Returns the length.
+function console_readline(buf: u32, max: u32): u32 {
+    let n: u32;
+    let c: u32;
+
+    n = 0;
+    loop {
+        console_cursor_sync();
+        sys_vsync();
+        kbd_poll();
+        c = kbd_char();
+        if (c == 10) {
+            console_putc(10);
+            poke(buf + n, u8, 0);
+            console_cursor_sync();
+            return n;
+        } else if (c == 8) {
+            if (n > 0) {
+                n--;
+                console_putc(8);
+            }
+        } else if (c >= 32 && c < 127 && n < max) {
+            poke(buf + n, u8, u8(c));
+            n++;
+            console_putc(c);
+        }
+    }
+    return n;
+}
+
+/// wait until the user presses any key (returns its code)
+function console_wait_key(): u32 {
+    loop {
+        sys_vsync();
+        kbd_poll();
+        if (kbd_event != 0) {
+            return kbd_event;
+        }
+    }
+    return 0;
+}

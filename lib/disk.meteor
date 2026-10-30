@@ -1,0 +1,55 @@
+module disk;
+include "../inc/std.quartz";
+
+/// Raw sector disks. A drive is addressed with its bus device number std.BUS_DEV_DISK0 or
+/// std.BUS_DEV_DISK1; there is no file system, only 512 byte sectors counted from 0 (the LBA).
+/// A machine may have 0, 1 or 2 disks (quartz --disk0 / --disk1).
+
+const DISK_SECTOR = 512;
+
+/// 1 when the drive is attached
+function disk_present(dev: u32): u32 {
+    return u32(bus_status(dev));
+}
+
+/// number of 512 byte sectors of the disk
+function disk_sectors(dev: u32): u32 {
+    return in(dev, std.DISK_PORT_SECTOR_COUNT);
+}
+
+/// size of a sector in bytes (512)
+function disk_sector_size(dev: u32): u32 {
+    return in(dev, std.DISK_PORT_SECTOR_SIZE);
+}
+
+/// reads `count` sectors starting at `lba` to RAM, returns 1 on success
+function disk_read(dev: u32, lba: u32, buf: u32, count: u32): u32 {
+    out(dev, std.DISK_PORT_LBA, lba);
+    if (u32(inb(dev, std.DISK_CMD_READ, buf, count * DISK_SECTOR)) == count * DISK_SECTOR) {
+        return 1;
+    }
+    return 0;
+}
+
+/// reads exactly `bytes` bytes (not necessarily a multiple of 512) starting at sector `lba`
+function disk_read_bytes(dev: u32, lba: u32, buf: u32, bytes: u32): u32 {
+    out(dev, std.DISK_PORT_LBA, lba);
+    if (u32(inb(dev, std.DISK_CMD_READ, buf, bytes)) == bytes) {
+        return 1;
+    }
+    return 0;
+}
+
+/// writes `count` sectors from RAM starting at `lba`, returns 1 on success
+function disk_write(dev: u32, lba: u32, buf: u32, count: u32): u32 {
+    out(dev, std.DISK_PORT_LBA, lba);
+    if (u32(outb(dev, std.DISK_CMD_WRITE, buf, count * DISK_SECTOR)) == count * DISK_SECTOR) {
+        return 1;
+    }
+    return 0;
+}
+
+/// status of the last operation (see the Quartz documentation)
+function disk_status(dev: u32): u32 {
+    return in(dev, std.DISK_PORT_STATUS);
+}

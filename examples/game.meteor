@@ -1,0 +1,107 @@
+program "game - Pong (640x480). Left paddle: W/S, right paddle: Up/Down arrows. Score in text mode (port of game.quartz, uses lib/gfx, lib/input, lib/text)";
+import "../lib/gfx.obj";
+import "../lib/input.obj";
+import "../lib/text.obj";
+
+const BALL = 10;
+const PAD_W = 10;
+const PAD_H = 60;
+const LEFT_X = 20;
+const RIGHT_X = 610;
+const PAD_MAX = 420;
+const BALL_MAX = 470;
+
+let bx: i32;
+let by: i32;
+let bdx: i32;
+let bdy: i32;
+let ly: i32;
+let ry: i32;
+let ls: u32;
+let rs: u32;
+
+function update_score() {
+    text_put(10, 1, ls % 10 + 48, COLOR_WHITE, COLOR_BLACK);
+    text_put(68, 1, rs % 10 + 48, COLOR_WHITE, COLOR_BLACK);
+}
+
+function serve() {
+    bx = 315;
+    by = 235;
+    bdx = 0;
+    bdy = 0;
+    update_score();
+}
+
+serve();
+ly = 210;
+ry = 210;
+ls = 0;
+rs = 0;
+update_score();
+loop {
+    /// a transparent clear keeps the text layer with the score visible
+    gfx_clear(COLOR_TRANSPARENT);
+    gfx_fill_rect(bx, by, BALL, BALL, COLOR_WHITE);
+    gfx_fill_rect(LEFT_X, ly, PAD_W, PAD_H, COLOR_WHITE);
+    gfx_fill_rect(RIGHT_X, ry, PAD_W, PAD_H, COLOR_WHITE);
+    gfx_vsync();
+    kbd_poll();
+    /// paddles
+    if (kbd_down(kb.KEY_W) == 1) {
+        ly = math_max(ly - 5, 0);
+    }
+    if (kbd_down(kb.KEY_S) == 1) {
+        ly = math_min(ly + 5, PAD_MAX);
+    }
+    if (kbd_down(kb.KEY_UP) == 1) {
+        ry = math_max(ry - 5, 0);
+    }
+    if (kbd_down(kb.KEY_DOWN) == 1) {
+        ry = math_min(ry + 5, PAD_MAX);
+    }
+    /// ball movement
+    if (bdx == 0) {
+        bx += 4;
+    } else {
+        bx -= 4;
+    }
+    if (bdy == 0) {
+        by += 4;
+    } else {
+        by -= 4;
+    }
+    /// bounce off the top/bottom edge
+    if (by <= 0) {
+        by = 0;
+        bdy = 0;
+    }
+    if (by >= BALL_MAX) {
+        by = BALL_MAX;
+        bdy = 1;
+    }
+    /// left paddle: the ball must be moving left
+    if (bdx != 0 && bx <= LEFT_X + PAD_W) {
+        if (by + BALL < ly || by > ly + PAD_H) {
+            if (bx <= 0) {
+                rs++;
+                serve();
+            }
+        } else {
+            bdx = 0;
+            bx = LEFT_X + PAD_W;
+        }
+    }
+    /// right paddle: the ball must be moving right
+    if (bdx == 0 && bx >= RIGHT_X - BALL) {
+        if (by + BALL < ry || by > ry + PAD_H) {
+            if (bx >= 640) {
+                ls++;
+                serve();
+            }
+        } else {
+            bdx = 1;
+            bx = RIGHT_X - BALL;
+        }
+    }
+}

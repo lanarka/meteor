@@ -1,0 +1,141 @@
+program "hexview - a hex dump viewer. It shows the RAM of this very program, or (D) the sectors of DISK0 when a disk is attached. Up/Down = 16 bytes, PgUp/PgDn = 256 bytes, Home/End, Left/Right = previous / next disk sector, Esc quits. (lib/tui, lib/input, lib/str, lib/disk)";
+import "../lib/tui.obj";
+import "../lib/input.obj";
+import "../lib/str.obj";
+import "../lib/disk.obj";
+
+const ROWS = 16;
+const VIEW = 256;
+const MODE_RAM = 0;
+const MODE_DISK = 1;
+
+let mode: u32;
+let view_addr: u32;
+let sector_no: u32;
+let sector: u8[DISK_SECTOR];
+let dirty: u32 = 1;
+let hex: u8[4];
+let addr_text: u8[12];
+let ascii: u8[20];
+let s_title: u8[] = " Hex viewer ";
+let s_ram: u8[] = "RAM";
+let s_disk: u8[] = "DISK0 sector ";
+let s_keys: u8[] = "Up/Down line  PgUp/PgDn page  Home/End  D disk/RAM  Left/Right sector  Esc quit";
+let s_nodisk: u8[] = "(no disk attached)";
+let i: u32;
+let j: u32;
+
+/// one byte of the data being viewed; `offset` is an address in RAM mode, an offset in the sector in disk mode
+function fetch(offset: u32): u32 {
+    if (mode == MODE_DISK) {
+        return u32(sector[offset % DISK_SECTOR]);
+    }
+    return u32(peek(offset, u8));
+}
+
+function max_start(): u32 {
+    if (mode == MODE_DISK) {
+        return DISK_SECTOR - VIEW;
+    }
+    return sys_ram_size() - VIEW;
+}
+
+function load_sector() {
+    if (disk_read(std.BUS_DEV_DISK0, sector_no, addr(sector), 1) == 0) {
+        memset(addr(sector), 0, DISK_SECTOR);
+    }
+}
+
+function draw() {
+    let row: u32;
+    let b: u32;
+    let base: u32;
+
+    tui_clear(COLOR_GRAY, COLOR_DARK_BLUE);
+    tui_window(0, 0, 80, 22, addr(s_title), COLOR_WHITE, COLOR_BLACK, COLOR_YELLOW);
+    if (mode == MODE_DISK) {
+        tui_str(2, 1, addr(s_disk), COLOR_CYAN, COLOR_BLACK);
+        tui_int(15, 1, i32(sector_no), 6, COLOR_WHITE, COLOR_BLACK);
+    } else {
+        tui_str(2, 1, addr(s_ram), COLOR_CYAN, COLOR_BLACK);
+    }
+    for (row of 0 .. ROWS) {
+        base = view_addr + row * 16;
+        str_hex(base, 8, addr(addr_text));
+        tui_str(2, 3 + row, addr(addr_text), COLOR_CYAN, COLOR_BLACK);
+        for (j of 0 .. 16) {
+            b = fetch(base + j);
+            str_hex(b, 2, addr(hex));
+            /// a wider gap in the middle of the 16 bytes
+            tui_str(13 + j * 3 + j / 8, 3 + row, addr(hex), COLOR_WHITE, COLOR_BLACK);
+            if (b >= 32 && b < 127) {
+                ascii[j] = u8(b);
+            } else {
+                ascii[j] = 46;
+            }
+        }
+        ascii[16] = 0;
+        tui_str(62, 3 + row, addr(ascii), COLOR_GREEN, COLOR_BLACK);
+    }
+    tui_str_center(0, 80, 23, addr(s_keys), COLOR_GRAY, COLOR_DARK_BLUE);
+}
+
+text_cursor(0);
+loop {
+    kbd_poll();
+    if (kbd_pressed(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    if (kbd_event == kb.KEY_DOWN) {
+        view_addr = math_umin(view_addr + 16, max_start());
+        dirty = 1;
+    }
+    if (kbd_event == kb.KEY_UP) {
+        view_addr = math_umax(view_addr, 16) - 16;
+        dirty = 1;
+    }
+    if (kbd_event == kb.KEY_PAGE_DOWN) {
+        view_addr = math_umin(view_addr + VIEW, max_start());
+        dirty = 1;
+    }
+    if (kbd_event == kb.KEY_PAGE_UP) {
+        view_addr = math_umax(view_addr, VIEW) - VIEW;
+        dirty = 1;
+    }
+    if (kbd_pressed(kb.KEY_HOME) == 1) {
+        view_addr = 0;
+        dirty = 1;
+    }
+    if (kbd_pressed(kb.KEY_END) == 1) {
+        view_addr = max_start();
+        dirty = 1;
+    }
+    if (kbd_pressed(kb.KEY_D) == 1 && disk_present(std.BUS_DEV_DISK0) == 1) {
+        if (mode == MODE_RAM) {
+            mode = MODE_DISK;
+            sector_no = 0;
+            load_sector();
+        } else {
+            mode = MODE_RAM;
+        }
+        view_addr = 0;
+        dirty = 1;
+    }
+    if (mode == MODE_DISK) {
+        if (kbd_event == kb.KEY_RIGHT && sector_no + 1 < disk_sectors(std.BUS_DEV_DISK0)) {
+            sector_no++;
+            load_sector();
+            dirty = 1;
+        }
+        if (kbd_event == kb.KEY_LEFT && sector_no > 0) {
+            sector_no--;
+            load_sector();
+            dirty = 1;
+        }
+    }
+    if (dirty == 1) {
+        draw();
+        dirty = 0;
+    }
+    sys_vsync();
+}

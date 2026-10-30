@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# removes everything the build scripts create (the sources are never touched)
+cd "$(dirname "$0")"
+rm -rf dist/*
+rm -rf lib/*.obj
+rm -rf lib/*.json
+find . -name __pycache__ -type d -prune -exec rm -rf {} +

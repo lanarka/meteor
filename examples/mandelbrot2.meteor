@@ -1,0 +1,118 @@
+program "mb - Mandelbrot set, rendered progressively (250 pixels per frame) with an endless zoom into the Seahorse Valley. The VM has no int->float conversion; the per-pixel offsets are made with lib/math (math_itof builds a float from the integer bits) instead of the two 640 / 480 entry lookup tables of the original (port of mb.quartz, uses lib/gfx and lib/math)";
+import "../lib/gfx.obj";
+import "../lib/math.obj";
+const_type u32;
+
+const WIDTH = 640;
+const PIXELS = 307200;
+const BATCH = 250;
+const MAXITER_START = 50;
+const MAXITER_CAP = 400;
+const ZOOM_STEP = 0.78;
+const ZOOM_MIN = 5e-07;
+
+let pixel_idx: u32 = 0;
+let zoom: f32 = 1.0;
+let center_x: f32 = -0.743643887037151;
+let center_y: f32 = 0.13182590420533;
+let maxiter: u32 = MAXITER_START;
+let batch_i: u32;
+let px: u32;
+let py: u32;
+let palette: u32[] = [
+    0xFF1FF380, 0xFF18ED8C, 0xFF11E698, 0xFF0BDFA4, 0xFF07D6B0, 0xFF04CCBB, 0xFF01C2C6, 0xFF01B7D0,
+    0xFF01ACD9, 0xFF02A0E2, 0xFF0594E9, 0xFF0987F0, 0xFF0E7BF5, 0xFF146EF9, 0xFF1B62FC, 0xFF2356FE,
+    0xFF2C4BFF, 0xFF3640FE, 0xFF4135FC, 0xFF4C2BF9, 0xFF5822F5, 0xFF641AF0, 0xFF7013E9, 0xFF7C0DE2,
+    0xFF8908D9, 0xFF9505D0, 0xFFA102C6, 0xFFAD01BB, 0xFFB901B0, 0xFFC302A4, 0xFFCE0498, 0xFFD7078C,
+    0xFFE00C80, 0xFFE71273, 0xFFEE1967, 0xFFF4205B, 0xFFF8294F, 0xFFFB3344, 0xFFFE3D39, 0xFFFE482F,
+    0xFFFE5326, 0xFFFD5F1D, 0xFFFA6B16, 0xFFF6780F, 0xFFF1840A, 0xFFEB9106, 0xFFE49D03, 0xFFDCA901,
+    0xFFD3B401, 0xFFC9BF01, 0xFFBECA03, 0xFFB3D406, 0xFFA7DD0A, 0xFF9BE50F, 0xFF8FEC16, 0xFF83F21D,
+    0xFF76F726, 0xFF6AFA2F, 0xFF5EFD39, 0xFF52FE44, 0xFF46FE4F, 0xFF3CFD5B, 0xFF31FB67, 0xFF28F873
+];
+
+function next_pass() {
+    let z: f32;
+    let mi: u32;
+
+    /// zoom *= 0.78, maxiter += 10 (cap 400); when the zoom gets too deep for f32 the animation restarts
+    z = zoom * ZOOM_STEP;
+    if (z > ZOOM_MIN) {
+        zoom = z;
+        mi = maxiter + 10;
+        if (mi > MAXITER_CAP) {
+            mi = MAXITER_CAP;
+        }
+        maxiter = mi;
+    } else {
+        zoom = 1.0;
+        maxiter = MAXITER_START;
+    }
+    pixel_idx = 0;
+}
+
+function compute_pixel(x: u32, y: u32) {
+    let ux: f32;
+    let uy: f32;
+    let cx: f32;
+    let cy: f32;
+    let zr: f32;
+    let zi: f32;
+    let zr2: f32;
+    let zi2: f32;
+    let zin: f32;
+    let zrn: f32;
+    let iter: u32;
+    let maxit: u32;
+    let escaped: u32;
+    let color: u32;
+
+    /// the view is 4 x 3 units wide, centred on (0, 0) at zoom 1.0: 160 pixels per unit
+    ux = (math_itof(i32(x)) - 320.0) * 0.00625;
+    uy = (math_itof(i32(y)) - 240.0) * 0.00625;
+    cx = ux * zoom + center_x;
+    cy = uy * zoom + center_y;
+    zr = 0.0;
+    zi = 0.0;
+    iter = 0;
+    maxit = maxiter;
+    escaped = 0;
+    loop {
+        zr2 = zr * zr;
+        zi2 = zi * zi;
+        if (zr2 + zi2 > 4.0) {
+            escaped = 1;
+            break;
+        }
+        if (iter >= maxit) {
+            break;
+        }
+        /// zi' = 2*zr*zi + cy ; zr' = zr2 - zi2 + cx
+        zin = (zr * zi) * 2.0 + cy;
+        zrn = zr2 - zi2 + cx;
+        zr = zrn;
+        zi = zin;
+        iter++;
+    }
+    if (escaped == 1) {
+        color = palette[iter & 63];
+    } else {
+        color = 0xFF000000;
+    }
+    gfx_plot(x, y, color);
+}
+
+gfx_clear(COLOR_BLACK);
+loop {
+    batch_i = 0;
+    do {
+        if (pixel_idx >= PIXELS) {
+            next_pass();
+        }
+        px = pixel_idx % WIDTH;
+        py = pixel_idx / WIDTH;
+        compute_pixel(px, py);
+        pixel_idx++;
+        batch_i++;
+    } while (batch_i < BATCH);
+    gfx_vsync();
+}

@@ -1,0 +1,118 @@
+module colors;
+
+/// Colours are u32 values in the VM's native 0xAABBGGRR layout (alpha in the top byte).
+
+const COLOR_TRANSPARENT = 0x00000000;
+const COLOR_BLACK = 0xFF000000;
+const COLOR_WHITE = 0xFFFFFFFF;
+const COLOR_RED = 0xFF0000FF;
+const COLOR_GREEN = 0xFF00FF00;
+const COLOR_BLUE = 0xFFFF0000;
+const COLOR_YELLOW = 0xFF00FFFF;
+const COLOR_CYAN = 0xFFFFFF00;
+const COLOR_MAGENTA = 0xFFFF00FF;
+const COLOR_GRAY = 0xFF808080;
+const COLOR_ORANGE = 0xFF0080FF;
+const COLOR_DARK_GRAY = 0xFF404040;
+const COLOR_LIGHT_GRAY = 0xFFC0C0C0;
+const COLOR_DARK_RED = 0xFF000080;
+const COLOR_DARK_GREEN = 0xFF008000;
+const COLOR_DARK_BLUE = 0xFF800000;
+const COLOR_BROWN = 0xFF0050A0;
+const COLOR_PINK = 0xFFC080FF;
+
+/// opaque colour from 8-bit red / green / blue
+function color_rgb(r: u32, g: u32, b: u32): u32 {
+    return 0xFF000000 | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255);
+}
+
+/// opaque or translucent colour from 8-bit red / green / blue / alpha
+function color_rgba(r: u32, g: u32, b: u32, a: u32): u32 {
+    return ((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255);
+}
+
+/// the red channel (0..255) of a colour
+function color_red(c: u32): u32 {
+    return c & 255;
+}
+
+/// the green channel (0..255) of a colour
+function color_green(c: u32): u32 {
+    return (c >> 8) & 255;
+}
+
+/// the blue channel (0..255) of a colour
+function color_blue(c: u32): u32 {
+    return (c >> 16) & 255;
+}
+
+/// the alpha channel (0..255) of a colour
+function color_alpha_of(c: u32): u32 {
+    return c >> 24;
+}
+
+/// the same colour with another alpha (0 = invisible, 255 = opaque)
+function color_alpha(c: u32, a: u32): u32 {
+    return (c & 0x00FFFFFF) | ((a & 255) << 24);
+}
+
+/// linear mix of two colours, t = 0 gives a, t = 255 gives b (every channel, alpha too)
+function color_mix(a: u32, b: u32, t: u32): u32 {
+    let u: u32;
+
+    if (t > 255) {
+        t = 255;
+    }
+    u = 255 - t;
+    /// the four channels in one expression (a loop over the channels is several times slower)
+    return (((a >> 24) * u + (b >> 24) * t) / 255) << 24
+        | ((((a >> 16) & 255) * u + ((b >> 16) & 255) * t) / 255) << 16
+        | ((((a >> 8) & 255) * u + ((b >> 8) & 255) * t) / 255) << 8
+        | ((a & 255) * u + (b & 255) * t) / 255;
+}
+
+/// darker (t = 255 gives black) / lighter (t = 255 gives white), alpha is kept
+function color_darken(c: u32, t: u32): u32 {
+    return color_mix(c, COLOR_BLACK, t);
+}
+
+/// lighter: mixes the colour with white, t = 255 gives white (alpha is kept)
+function color_lighten(c: u32, t: u32): u32 {
+    return color_mix(c, COLOR_WHITE, t);
+}
+
+/// grey level 0..255
+function color_gray(v: u32): u32 {
+    return color_rgb(v, v, v);
+}
+
+/// fully saturated rainbow colour, h = 0..255 walks red - yellow - green - cyan - blue - magenta
+function color_hue(h: u32): u32 {
+    let seg: u32;
+    let f: u32;
+
+    h = h % 256;
+    seg = h / 43;
+    f = (h % 43) * 6;
+    switch (seg) {
+        case 0: {
+            return color_rgb(255, f, 0);
+        }
+        case 1: {
+            return color_rgb(255 - f, 255, 0);
+        }
+        case 2: {
+            return color_rgb(0, 255, f);
+        }
+        case 3: {
+            return color_rgb(0, 255 - f, 255);
+        }
+        case 4: {
+            return color_rgb(f, 0, 255);
+        }
+        default: {
+            return color_rgb(255, 0, 255 - f);
+        }
+    }
+    return COLOR_BLACK;
+}

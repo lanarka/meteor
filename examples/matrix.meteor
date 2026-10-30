@@ -1,0 +1,71 @@
+program "matrix - falling green code in text mode. Every column has a head that falls at its own speed and a fading tail; the colours of the tail are mixed with color_mix (lib/colors, lib/text, lib/math). Press any key to stop.";
+import "../lib/text.obj";
+import "../lib/input.obj";
+import "../lib/math.obj";
+
+const COLS = 80;
+const ROWS = 30;
+const TAIL_MAX = 18;
+
+let head: i32[COLS];
+let tail: i32[COLS];
+let speed: u8[COLS];
+let salt: u8[COLS];
+let tick: u32;
+let x: u32;
+let d: u32;
+let y: i32;
+let fade: u32;
+let c: u32;
+
+function glyph(col: u32, row: i32): u32 {
+    /// a stable pseudo random character per cell (33..126), changing slowly with the column salt
+    return 33 + (col * 7 + u32(row) * 13 + u32(salt[col]) * 3 + tick / 24) % 94;
+}
+
+function restart_column(col: u32) {
+    head[col] = -i32(math_rand_below(ROWS));
+    tail[col] = i32(math_rand_below(TAIL_MAX - 6) + 6);
+    speed[col] = u8(math_rand_below(3) + 1);
+    salt[col] = u8(math_rand_below(256));
+}
+
+text_clear();
+text_cursor(0);
+for (x of 0 .. COLS) {
+    restart_column(x);
+}
+loop {
+    kbd_poll();
+    if (kbd_any() == 1) {
+        halt;
+    }
+    tick++;
+    for (x of 0 .. COLS) {
+        /// the head moves every speed-th tick (1 = fastest)
+        if (tick % u32(speed[x]) == 0) {
+            head[x] = head[x] + 1;
+        }
+        /// draw the head (white) and the tail, fading to black
+        for (d of 0 .. u32(tail[x]) + 1) {
+            y = head[x] - i32(d);
+            if (y >= 0 && y < ROWS) {
+                if (d == 0) {
+                    text_put(x, u32(y), glyph(x, y), COLOR_WHITE, COLOR_BLACK);
+                } else {
+                    fade = d * 255 / u32(tail[x] + 1);
+                    text_put(x, u32(y), glyph(x, y), color_mix(0xFF50FF70, 0xFF001000, fade), COLOR_BLACK);
+                }
+            }
+        }
+        /// erase the cell the tail has just left
+        y = head[x] - tail[x] - 1;
+        if (y >= 0 && y < ROWS) {
+            text_put(x, u32(y), 32, COLOR_BLACK, COLOR_BLACK);
+        }
+        if (head[x] - tail[x] > ROWS) {
+            restart_column(x);
+        }
+    }
+    sys_vsync();
+}

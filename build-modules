@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Compiles every lib/*.meteor module to lib/*.json and lib/*.obj.
+# The order matters: a module has to be built after the modules it imports.
+set -e
+cd "$(dirname "$0")"
+
+MODULES="${MODULES:-colors sys math str rtc input text tui console gfx cursor gtext audio disk part net arr fs fsck}"
+
+for m in $MODULES; do
+    python3 meteor/frontend.py lib/$m.meteor -o lib/$m.json --module
+    python3 meteor/bsontool.py json2bson lib/$m.json -o lib/$m.obj
+done

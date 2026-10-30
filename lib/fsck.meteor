@@ -1,0 +1,415 @@
+module fsck;
+import "fs.obj";
+
+/// Consistency check of a volume of lib/fs (like fsck / chkdsk): it walks the whole directory tree and
+/// compares it with the allocation table.
+///
+///   n = fsck_run(std.BUS_DEV_DISK0, 1, 0);      // volume 1; 0 = only look, 1 = also free lost clusters
+///   if (n == 0) { ... fsck_files, fsck_dirs, fsck_used, fsck_free ... }
+///   else if (n > 0) { ... fsck_log holds the first problems, one per line ... }
+///   else { ... fs_error ... }                   // the volume could not be checked
+///
+/// What is checked: the table entries 0 and 1, the volume label, every directory chain and every file chain
+/// (clusters that leave the volume, free clusters inside a chain, loops), that no cluster belongs to two
+/// files or directories (cross links), that the size of a file fits the length of its chain, that "." and
+/// ".." of every directory point to the right places, directories with a size, invalid and duplicate names
+/// (the first 64 entries of every directory), impossible dates and times, and clusters that are marked as
+/// used but belong to nobody (lost clusters). With fix = 1 the lost clusters are given back; the other problems
+/// are only reported - they need a human decision. A volume that is mounted must have no open files; a volume
+/// that is not mounted is mounted for the time of the check.
+///
+/// fsck_dirs counts the directories below the root. RAM: about 11 KB (a bit for every cluster, the list of
+/// problems), so a program that uses it needs ram(size: 65536) or more.
+
+const FSCK_STACK = 256;
+const FSCK_LOG_SIZE = 1536;
+const FSCK_NAMES = 64;
+
+/// kinds of problems
+const FSCK_NO_LABEL = 0;
+const FSCK_BAD_TABLE = 1;
+const FSCK_DIR_CHAIN = 2;
+const FSCK_FILE_CHAIN = 3;
+const FSCK_SIZE = 4;
+const FSCK_CROSS = 5;
+const FSCK_NAME = 6;
+const FSCK_DUPLICATE = 7;
+const FSCK_DIR_SIZE = 8;
+const FSCK_DOT = 9;
+const FSCK_DOTDOT = 10;
+const FSCK_DATE = 11;
+const FSCK_LOST = 12;
+const FSCK_TOO_DEEP = 13;
+
+/// what the last fsck_run found
+let fsck_files: u32;
+let fsck_dirs: u32;
+/// clusters that belong to files and directories
+let fsck_used: u32;
+/// free clusters
+let fsck_free: u32;
+let fsck_lost: u32;
+/// the lost clusters that were given back
+let fsck_fixed: u32;
+/// the number of problems, and the first of them as text: one line each ("message (number)")
+let fsck_errors: u32;
+let fsck_log: u8[FSCK_LOG_SIZE];
+
+let fsck_len: u32;
+let fsck_owned: u8[8192];
+let fsck_stack: u16[FSCK_STACK];
+let fsck_parent: u16[FSCK_STACK];
+let fsck_sp: u32;
+let fsck_skipped: u32;
+let fsck_names: u8[FSCK_NAMES * 11];
+let fsck_num: u8[12];
+let fsck_messages: u8[] = "The volume has no label\0The table entries 0 / 1 are wrong\0A directory chain is damaged, cluster\0A file chain is damaged, first cluster\0The size does not fit the chain, first cluster\0A cluster is used twice, cluster\0Invalid name in the directory at cluster\0Duplicate name in the directory at cluster\0A directory has a size, first cluster\0The entry . is wrong in the directory at cluster\0The entry .. is wrong in the directory at cluster\0Impossible date or time in the directory at cluster\0Lost cluster\0Too many directories to check, directory at cluster";
+
+/// adds a problem: its kind (FSCK_*) and a number that says where
+function fsck_problem(kind: u32, n: u32) {
+    let a: u32;
+    let k: u32;
+    let len: u32;
+
+    fsck_errors++;
+    a = addr(fsck_messages);
+    for (k of 0 .. kind) {
+        a = a + str_len(a) + 1;
+    }
+    len = str_len(a);
+    /// the line: message, " (", number, ")" and a newline; it must fit completely
+    if (fsck_len + len + 16 < FSCK_LOG_SIZE) {
+        str_copy(addr(fsck_log) + fsck_len, a);
+        fsck_len = fsck_len + len;
+        fsck_log[fsck_len] = 32;
+        fsck_log[fsck_len + 1] = 40;
+        fsck_len = fsck_len + 2;
+        fsck_len = fsck_len + str_utoa(n, addr(fsck_log) + fsck_len);
+        fsck_log[fsck_len] = 41;
+        fsck_log[fsck_len + 1] = 10;
+        fsck_log[fsck_len + 2] = 0;
+        fsck_len = fsck_len + 2;
+    }
+}
+
+/// marks a cluster as used by the tree; 0 (and a problem) when something else owns it already
+function fsck_claim(c: u32): u32 {
+    let mask: u32;
+    let idx: u32;
+
+    idx = c / 8;
+    mask = 1 << (c % 8);
+    if ((u32(fsck_owned[idx]) & mask) != 0) {
+        fsck_problem(FSCK_CROSS, c);
+        return 0;
+    }
+    fsck_owned[idx] = u8(u32(fsck_owned[idx]) | mask);
+    fsck_used++;
+    return 1;
+}
+
+function fsck_is_owned(c: u32): u32 {
+    if ((u32(fsck_owned[c / 8]) & (1 << (c % 8))) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// Follows the chain of a file from its first cluster and claims every cluster: the number of clusters, or
+/// FS_NONE when the chain is damaged.
+function fsck_chain(first: u32): u32 {
+    let c: u32;
+    let n: u32;
+    let nxt: u32;
+
+    c = first;
+    n = 0;
+    loop {
+        if (fs_valid_cluster(c) == 0) {
+            fsck_problem(FSCK_FILE_CHAIN, first);
+            return FS_NONE;
+        }
+        if (fsck_claim(c) == 0) {
+            return FS_NONE;
+        }
+        n++;
+        nxt = fs_fat_get(c);
+        if (fs_error != 0) {
+            return FS_NONE;
+        }
+        if (nxt >= FS_EOC_MIN) {
+            return n;
+        }
+        if (nxt == 0) {
+            fsck_problem(FSCK_FILE_CHAIN, first);
+            return FS_NONE;
+        }
+        c = nxt;
+    }
+    return FS_NONE;
+}
+
+/// is the 8.3 name at e a possible name? (letters, digits and the allowed signs, blanks only at the end)
+function fsck_name_ok(e: u32): u32 {
+    let i: u32;
+    let c: u32;
+    let blank: u32;
+
+    if (fs_peek8(e) == 32) {
+        return 0;
+    }
+    blank = 0;
+    for (i of 0 .. 11) {
+        c = fs_peek8(e + i);
+        if (i == 8) {
+            blank = 0;
+        }
+        if (c == 32) {
+            blank = 1;
+        } else if (blank == 1 || fs_name_char_ok(c) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/// a packed date: 0 (= not set) or a month 1 .. 12 and a day 1 .. 31
+function fsck_one_date(d: u32): u32 {
+    if (d != 0 && (fs_date_month(d) < 1 || fs_date_month(d) > 12 || fs_date_day(d) < 1)) {
+        return 0;
+    }
+    return 1;
+}
+
+/// the dates and the time of the change of an entry at e are possible values
+function fsck_date_ok(e: u32): u32 {
+    let t: u32;
+
+    if (fsck_one_date(fs_peek16(e + FS_E_CDATE)) == 0 || fsck_one_date(fs_peek16(e + FS_E_ADATE)) == 0
+        || fsck_one_date(fs_peek16(e + FS_E_MDATE)) == 0) {
+        return 0;
+    }
+    t = fs_peek16(e + FS_E_MTIME);
+    if (fs_time_hour(t) > 23 || fs_time_minute(t) > 59 || (t & 31) > 29) {
+        return 0;
+    }
+    return 1;
+}
+
+/// checks one directory: the entries, and the chains of its files; subdirectories go to the stack
+function fsck_scan_dir(dir: u32, parent: u32) {
+    let c: u32;
+    let i: u32;
+    let e: u32;
+    let first: u32;
+    let n: u32;
+    let need: u32;
+    let size: u32;
+    let attr: u32;
+    let phys: u32;
+    let cl: u32;
+    let k: u32;
+    let names: u32;
+    let ended: u32;
+    let guard: u32;
+
+    c = dir;
+    names = 0;
+    phys = 0;
+    ended = 0;
+    guard = 0;
+    while (ended == 0 && guard <= fs_clusters) {
+        if (fs_valid_cluster(c) == 0) {
+            fsck_problem(FSCK_DIR_CHAIN, dir);
+            return;
+        }
+        if (fsck_claim(c) == 0) {
+            return;
+        }
+        if (fs_read_sector(fs_cluster_lba(c), addr(fs_sec)) == 0) {
+            return;
+        }
+        for (i of 0 .. 16) {
+            if (ended == 1) {
+                break;
+            }
+            e = addr(fs_sec) + i * 32;
+            first = fs_peek8(e);
+            if (first == 0) {
+                ended = 1;
+            } else if (first != 0xE5 && (fs_peek8(e + FS_E_ATTR) & FS_ATTR_LABEL) == 0) {
+                attr = fs_peek8(e + FS_E_ATTR);
+                cl = fs_peek16(e + FS_E_CLUSTER);
+                size = fs_peek32(e + FS_E_SIZE);
+                if (fsck_date_ok(e) == 0) {
+                    fsck_problem(FSCK_DATE, dir);
+                }
+                if (dir != FS_ROOT && phys == 0) {
+                    /// the first entry of a directory is "." and points to the directory itself
+                    if (fs_same11(e, addr(fs_dot83)) == 0 || cl != dir) {
+                        fsck_problem(FSCK_DOT, dir);
+                    }
+                } else if (dir != FS_ROOT && phys == 1) {
+                    /// the second one is ".." and points to the parent (0 = the root)
+                    k = parent;
+                    if (parent == FS_ROOT) {
+                        k = 0;
+                    }
+                    if (fs_same11(e, addr(fs_dotdot83)) == 0 || cl != k) {
+                        fsck_problem(FSCK_DOTDOT, dir);
+                    }
+                } else {
+                    if (fsck_name_ok(e) == 0) {
+                        fsck_problem(FSCK_NAME, dir);
+                    }
+                    /// the names of the directory seen so far
+                    for (k of 0 .. names) {
+                        if (fs_same11(addr(fsck_names) + k * 11, e) == 1) {
+                            fsck_problem(FSCK_DUPLICATE, dir);
+                        }
+                    }
+                    if (names < FSCK_NAMES) {
+                        memcpy(addr(fsck_names) + names * 11, e, 11);
+                        names++;
+                    }
+                    if ((attr & FS_ATTR_DIR) != 0) {
+                        fsck_dirs++;
+                        if (size != 0) {
+                            fsck_problem(FSCK_DIR_SIZE, cl);
+                        }
+                        if (fs_valid_cluster(cl) == 0) {
+                            fsck_problem(FSCK_DIR_CHAIN, cl);
+                        } else if (fsck_sp >= FSCK_STACK) {
+                            fsck_problem(FSCK_TOO_DEEP, cl);
+                            fsck_skipped = 1;
+                        } else {
+                            fsck_stack[fsck_sp] = u16(cl);
+                            fsck_parent[fsck_sp] = u16(dir);
+                            fsck_sp++;
+                        }
+                    } else {
+                        fsck_files++;
+                        need = (size + FS_SECTOR - 1) / FS_SECTOR;
+                        if (cl == 0) {
+                            if (need != 0) {
+                                fsck_problem(FSCK_SIZE, 0);
+                            }
+                        } else {
+                            n = fsck_chain(cl);
+                            if (n != FS_NONE && n != need) {
+                                fsck_problem(FSCK_SIZE, cl);
+                            }
+                        }
+                    }
+                }
+            }
+            phys++;
+        }
+        if (ended == 0) {
+            c = fs_fat_get(c);
+            if (fs_error != 0) {
+                return;
+            }
+            if (c >= FS_EOC_MIN) {
+                ended = 1;
+            } else if (c == 0) {
+                fsck_problem(FSCK_DIR_CHAIN, dir);
+                return;
+            }
+        }
+        guard++;
+    }
+}
+
+/// Checks the volume `vol` of the disk `dev`. Returns the number of problems (0 = the volume is consistent)
+/// or -1 when it could not be checked (fs_error tells why). With fix = 1 lost clusters are freed.
+function fsck_run(dev: u32, vol: u32, fix: u32): i32 {
+    let s: u32;
+    let own: u32;
+    let h: u32;
+    let c: u32;
+    let sl: i32;
+    let d: u32;
+    let p: u32;
+
+    fs_error = 0;
+    fsck_files = 0;
+    fsck_dirs = 0;
+    fsck_used = 0;
+    fsck_free = 0;
+    fsck_lost = 0;
+    fsck_fixed = 0;
+    fsck_errors = 0;
+    fsck_len = 0;
+    fsck_log[0] = 0;
+    fsck_sp = 0;
+    fsck_skipped = 0;
+    own = 0;
+    s = fs_find_volume(dev, vol);
+    if (s == FS_NONE) {
+        sl = fs_mount_raw(dev, vol);
+        if (sl < 0) {
+            return -1;
+        }
+        s = u32(sl);
+        own = 1;
+    }
+    for (h of 0 .. FS_MAX_FILES) {
+        if (fs_h_used[h] == 1 && fs_h_slot[h] == s) {
+            fs_error = FS_ERR_BUSY;
+            return -1;
+        }
+    }
+    fs_select(s);
+    memset(addr(fsck_owned), 0, sizeof(fsck_owned));
+    if (fs_m_label[s * 49] == 0) {
+        fsck_problem(FSCK_NO_LABEL, 0);
+    }
+    /// the table entries 0 and 1 are not clusters: read them from the first table sector
+    if (fs_fat_load(0) == 1) {
+        if (fs_peek16(addr(fs_fatbuf)) != 0xFFF8 || fs_peek16(addr(fs_fatbuf) + 2) != FS_EOC) {
+            fsck_problem(FSCK_BAD_TABLE, 0);
+        }
+    }
+    fs_error = 0;
+    /// the tree, from the root: every directory is scanned once (no recursion: a list of the ones that wait)
+    fsck_stack[0] = FS_ROOT;
+    fsck_parent[0] = FS_ROOT;
+    fsck_sp = 1;
+    while (fsck_sp > 0 && fs_error == 0) {
+        fsck_sp--;
+        d = u32(fsck_stack[fsck_sp]);
+        p = u32(fsck_parent[fsck_sp]);
+        fsck_scan_dir(d, p);
+    }
+    if (fs_error != 0) {
+        if (own == 1) {
+            fs_unmount_slot(s);
+        }
+        return -1;
+    }
+    /// the table against the tree: what is allocated but not owned is lost
+    for (c of 2 .. fs_clusters + 2) {
+        if (fs_fat_get(c) != 0) {
+            if (fsck_is_owned(c) == 0 && fsck_skipped == 0) {
+                fsck_lost++;
+                fsck_problem(FSCK_LOST, c);
+                if (fix == 1 && fs_fat_set(c, 0) == 1) {
+                    fsck_fixed++;
+                }
+            }
+        } else {
+            fsck_free++;
+        }
+    }
+    if (fix == 1 && fsck_fixed > 0) {
+        fsck_free = fsck_free + fsck_fixed;
+    }
+    if (own == 1) {
+        fs_unmount_slot(s);
+    }
+    if (fs_error != 0) {
+        return -1;
+    }
+    return i32(fsck_errors);
+}

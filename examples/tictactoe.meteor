@@ -1,0 +1,257 @@
+program "tictactoe - you (X) against the computer (O), played with the mouse in text mode. The computer wins when it can, blocks you when it must, otherwise takes the centre, a corner or any free cell. Click a cell to move; click anywhere (or press R) to start a new game when it is over. (lib/tui, lib/input)";
+import "../lib/tui.obj";
+import "../lib/input.obj";
+
+const OX = 24;
+const OY = 7;
+const CELL_W = 9;
+const CELL_H = 3;
+const PLAYING = 0;
+const PLAYER_WINS = 1;
+const COMPUTER_WINS = 2;
+const DRAW = 3;
+
+/// 0 = empty, 1 = X (you), 2 = O (the computer)
+let board: u8[9];
+/// the 8 winning lines as cell triples
+let lines: u8[24] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 3, 6, 1, 4, 7, 2, 5, 8, 0, 4, 8, 2, 4, 6];
+let corners: u8[4] = [0, 2, 6, 8];
+let state: u32;
+let wins_you: u32;
+let wins_me: u32;
+let draws: u32;
+let hover: i32;
+/// the screen is drawn again only when something changed (the mouse moved, a click, a key)
+let dirty: u32 = 1;
+let last_mx: i32;
+let last_my: i32;
+let s_title: u8[] = "TIC TAC TOE";
+let s_x: u8[] = "X";
+let s_o: u8[] = "O";
+let s_turn: u8[] = "Your turn - click a cell";
+let s_won: u8[] = "You win!  Click to play again";
+let s_lost: u8[] = "I win!  Click to play again";
+let s_draw: u8[] = "A draw.  Click to play again";
+let s_you: u8[] = "You: ";
+let s_me: u8[] = "   Computer: ";
+let s_dr: u8[] = "   Draws: ";
+
+/// who (1 / 2) owns a complete line, or 0
+function winner(): u32 {
+    let i: u32;
+    let a: u32;
+    let b: u32;
+    let c: u32;
+
+    for (i of 0 .. 8) {
+        a = u32(board[lines[i * 3]]);
+        b = u32(board[lines[i * 3 + 1]]);
+        c = u32(board[lines[i * 3 + 2]]);
+        if (a != 0 && a == b && b == c) {
+            return a;
+        }
+    }
+    return 0;
+}
+
+function free_cells(): u32 {
+    let i: u32;
+    let n: u32;
+
+    n = 0;
+    for (i of 0 .. 9) {
+        if (board[i] == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/// the cell where `who` would complete a line, or -1
+function finishing_move(who: u32): i32 {
+    let i: u32;
+
+    for (i of 0 .. 9) {
+        if (board[i] == 0) {
+            board[i] = u8(who);
+            if (winner() == who) {
+                board[i] = 0;
+                return i32(i);
+            }
+            board[i] = 0;
+        }
+    }
+    return -1;
+}
+
+/// the n-th free cell (n counts from 0)
+function nth_free(n: u32): i32 {
+    let i: u32;
+
+    for (i of 0 .. 9) {
+        if (board[i] == 0) {
+            if (n == 0) {
+                return i32(i);
+            }
+            n--;
+        }
+    }
+    return -1;
+}
+
+function computer_move(): i32 {
+    let m: i32;
+    let i: u32;
+    let n: u32;
+
+    m = finishing_move(2);
+    if (m >= 0) {
+        return m;
+    }
+    m = finishing_move(1);
+    if (m >= 0) {
+        return m;
+    }
+    if (board[4] == 0) {
+        return 4;
+    }
+    /// a random free corner
+    n = 0;
+    for (i of 0 .. 4) {
+        if (board[corners[i]] == 0) {
+            n++;
+        }
+    }
+    if (n > 0) {
+        n = math_rand_below(n);
+        for (i of 0 .. 4) {
+            if (board[corners[i]] == 0) {
+                if (n == 0) {
+                    return i32(corners[i]);
+                }
+                n--;
+            }
+        }
+    }
+    return nth_free(math_rand_below(free_cells()));
+}
+
+/// after a move: did somebody win, or is the board full?
+function judge() {
+    let w: u32;
+
+    w = winner();
+    if (w == 1) {
+        state = PLAYER_WINS;
+        wins_you++;
+    } else if (w == 2) {
+        state = COMPUTER_WINS;
+        wins_me++;
+    } else if (free_cells() == 0) {
+        state = DRAW;
+        draws++;
+    }
+}
+
+function new_game() {
+    memset(addr(board), 0, sizeof(board));
+    state = PLAYING;
+}
+
+function draw_screen() {
+    let i: u32;
+    let x: u32;
+    let y: u32;
+    let bg: u32;
+
+    tui_fill(0, 0, text_cols, text_rows, 32, COLOR_WHITE, COLOR_BLACK);
+    tui_str_center(0, text_cols, 3, addr(s_title), COLOR_YELLOW, COLOR_BLACK);
+    for (i of 0 .. 9) {
+        x = OX + (i % 3) * CELL_W;
+        y = OY + (i / 3) * CELL_H;
+        bg = COLOR_BLACK;
+        if (hover == i32(i) && board[i] == 0 && state == PLAYING) {
+            bg = COLOR_DARK_BLUE;
+        }
+        tui_box(x, y, CELL_W, CELL_H, TUI_FRAME_SINGLE, COLOR_GRAY, bg);
+        if (board[i] == 1) {
+            tui_str_center(x, CELL_W, y + 1, addr(s_x), COLOR_CYAN, bg);
+        } else if (board[i] == 2) {
+            tui_str_center(x, CELL_W, y + 1, addr(s_o), COLOR_ORANGE, bg);
+        }
+    }
+    if (state == PLAYING) {
+        tui_str_center(0, text_cols, 18, addr(s_turn), COLOR_WHITE, COLOR_BLACK);
+    } else if (state == PLAYER_WINS) {
+        tui_str_center(0, text_cols, 18, addr(s_won), COLOR_GREEN, COLOR_BLACK);
+    } else if (state == COMPUTER_WINS) {
+        tui_str_center(0, text_cols, 18, addr(s_lost), COLOR_RED, COLOR_BLACK);
+    } else {
+        tui_str_center(0, text_cols, 18, addr(s_draw), COLOR_YELLOW, COLOR_BLACK);
+    }
+    tui_str(26, 21, addr(s_you), COLOR_GRAY, COLOR_BLACK);
+    tui_int(31, 21, i32(wins_you), 2, COLOR_WHITE, COLOR_BLACK);
+    tui_str(33, 21, addr(s_me), COLOR_GRAY, COLOR_BLACK);
+    tui_int(47, 21, i32(wins_me), 2, COLOR_WHITE, COLOR_BLACK);
+    tui_str(49, 21, addr(s_dr), COLOR_GRAY, COLOR_BLACK);
+    tui_int(59, 21, i32(draws), 2, COLOR_WHITE, COLOR_BLACK);
+    tui_cursor(u32(mouse_x), u32(mouse_y));
+}
+
+/// the cell under the mouse, or -1
+function cell_at(mx: i32, my: i32): i32 {
+    let cx: i32;
+    let cy: i32;
+
+    if (mx < OX || my < OY || mx >= OX + 3 * CELL_W || my >= OY + 3 * CELL_H) {
+        return -1;
+    }
+    cx = (mx - OX) / CELL_W;
+    cy = (my - OY) / CELL_H;
+    return cy * 3 + cx;
+}
+
+function on_click() {
+    let m: i32;
+
+    if (state != PLAYING) {
+        new_game();
+        return;
+    }
+    m = cell_at(mouse_x, mouse_y);
+    if (m < 0 || board[m] != 0) {
+        return;
+    }
+    board[m] = 1;
+    judge();
+    if (state == PLAYING) {
+        board[computer_move()] = 2;
+        judge();
+    }
+}
+
+mouse_mode(1);
+new_game();
+loop {
+    kbd_poll();
+    mouse_poll();
+    hover = cell_at(mouse_x, mouse_y);
+    if (mouse_clicked() == 1) {
+        on_click();
+        dirty = 1;
+    }
+    if (kbd_pressed(kb.KEY_R) == 1) {
+        new_game();
+        dirty = 1;
+    }
+    if (mouse_x != last_mx || mouse_y != last_my) {
+        dirty = 1;
+    }
+    if (dirty == 1) {
+        draw_screen();
+        dirty = 0;
+        last_mx = mouse_x;
+        last_my = mouse_y;
+    }
+    sys_vsync();
+}

@@ -1,0 +1,13 @@
+program "gfx - a 4x4 red rectangle sliding across the screen (port of gfx.quartz, uses lib/gfx)";
+import "../lib/gfx.obj";
+
+let x: i32 = 0;
+
+loop {
+    gfx_fill_rect(x, 40, 4, 4, COLOR_RED);
+    gfx_vsync();
+    x = x + 4;
+    if (x >= gfx_w) {
+        x = 0;
+    }
+}

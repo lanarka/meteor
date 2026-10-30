@@ -1,0 +1,181 @@
+program "snake - the classic. Arrow keys steer, eat the red apples to grow, do not hit the wall or yourself. The game gets faster with every apple; Enter restarts after a game over. The snake lives in a ring buffer plus an occupancy grid, so every move costs the same however long the snake is. (lib/gfx, lib/gtext, lib/input, lib/math)";
+import "../lib/gtext.obj";
+import "../lib/input.obj";
+/// lib/gtext keeps a glyph cache of ~66 KB
+ram(size: 262144);
+
+const CELL = 20;
+const COLS = 32;
+const ROWS = 22;
+const TOP = 40;
+const MAX_LEN = COLS * ROWS;
+const BG = 0xFF181818;
+const BODY = 0xFF30B030;
+const HEAD = 0xFF70FF70;
+const APPLE = 0xFF2020FF;
+
+/// the cells of the snake from the tail (tail_i) to the head (head_i), as row * COLS + column
+let body: u16[MAX_LEN];
+/// 1 where the snake is
+let grid: u8[MAX_LEN];
+let head_i: u32;
+let tail_i: u32;
+let snake_len: u32;
+let dir: u32;
+let next_dir: u32;
+let apple: u32;
+let score: u32;
+let best: u32;
+let delay: u32;
+let frame: u32;
+let alive: u32;
+let s_score: u8[] = "SCORE";
+let s_best: u8[] = "BEST";
+let s_over: u8[] = "GAME OVER";
+let s_again: u8[] = "Press Enter to play again";
+let i: u32;
+
+function cell_rect(c: u32, color: u32) {
+    gfx_fill_rect(i32(c % COLS) * CELL + 1, TOP + i32(c / COLS) * CELL + 1, CELL - 2, CELL - 2, color);
+}
+
+function draw_scores() {
+    gfx_fill_rect(0, 0, 640, TOP - 2, 0xFF402010);
+    gtext(12, 12, addr(s_score), COLOR_YELLOW);
+    gtext_int(76, 12, i32(score), COLOR_WHITE);
+    gtext(500, 12, addr(s_best), COLOR_GRAY);
+    gtext_int(548, 12, i32(best), COLOR_WHITE);
+}
+
+function place_apple() {
+    /// try random cells until one is free (the board is never completely full in practice)
+    apple = math_rand_below(MAX_LEN);
+    while (grid[apple] == 1) {
+        apple = math_rand_below(MAX_LEN);
+    }
+    cell_rect(apple, APPLE);
+}
+
+function new_game() {
+    gfx_clear(BG);
+    memset(addr(grid), 0, sizeof(grid));
+    snake_len = 3;
+    tail_i = 0;
+    head_i = 2;
+    for (i of 0 .. 3) {
+        body[i] = u16(11 * COLS + 14 + i);
+        grid[body[i]] = 1;
+        cell_rect(u32(body[i]), BODY);
+    }
+    cell_rect(u32(body[2]), HEAD);
+    dir = 0;
+    next_dir = 0;
+    score = 0;
+    delay = 8;
+    alive = 1;
+    place_apple();
+    draw_scores();
+}
+
+function game_over() {
+    alive = 0;
+    if (score > best) {
+        best = score;
+    }
+    draw_scores();
+    /// double size, from the glyph cache (made at the start): 3x would be built from scratch, more than a frame
+    gtext_scale = 2;
+    gtext_center(0, 640, 190, addr(s_over), COLOR_RED);
+    gtext_scale = 1;
+    gtext_center(0, 640, 250, addr(s_again), COLOR_WHITE);
+}
+
+function step() {
+    let c: u32;
+    let x: i32;
+    let y: i32;
+    let nc: u32;
+    let tc: u32;
+
+    c = u32(body[head_i]);
+    x = i32(c % COLS);
+    y = i32(c / COLS);
+    switch (dir) {
+        case 0: {
+            x++;
+        }
+        case 1: {
+            y++;
+        }
+        case 2: {
+            x--;
+        }
+        default: {
+            y--;
+        }
+    }
+    if (x < 0 || x >= COLS || y < 0 || y >= ROWS) {
+        game_over();
+        return;
+    }
+    nc = u32(y * COLS + x);
+    if (nc != apple) {
+        /// no apple: the tail moves on (and may be entered by the head in the same step)
+        tc = u32(body[tail_i]);
+        grid[tc] = 0;
+        cell_rect(tc, BG);
+        tail_i = (tail_i + 1) % MAX_LEN;
+        snake_len--;
+    }
+    if (grid[nc] == 1) {
+        game_over();
+        return;
+    }
+    cell_rect(c, BODY);
+    head_i = (head_i + 1) % MAX_LEN;
+    body[head_i] = u16(nc);
+    grid[nc] = 1;
+    snake_len++;
+    cell_rect(nc, HEAD);
+    if (nc == apple) {
+        score++;
+        /// every 3 apples the snake gets one frame per step faster, down to 3
+        if (score % 3 == 0 && delay > 3) {
+            delay--;
+        }
+        place_apple();
+        draw_scores();
+    }
+}
+
+gtext_scale = 2;
+gtext_prepare(addr(s_over), COLOR_RED);
+gtext_scale = 1;
+gtext_prepare(addr(s_again), COLOR_WHITE);
+new_game();
+loop {
+    kbd_poll();
+    if (alive == 1) {
+        /// steering: no U-turns
+        if (kbd_down(kb.KEY_RIGHT) == 1 && dir != 2) {
+            next_dir = 0;
+        }
+        if (kbd_down(kb.KEY_DOWN) == 1 && dir != 3) {
+            next_dir = 1;
+        }
+        if (kbd_down(kb.KEY_LEFT) == 1 && dir != 0) {
+            next_dir = 2;
+        }
+        if (kbd_down(kb.KEY_UP) == 1 && dir != 1) {
+            next_dir = 3;
+        }
+        frame++;
+        if (frame % delay == 0) {
+            dir = next_dir;
+            step();
+        }
+    } else if (kbd_pressed(kb.KEY_ENTER) == 1) {
+        new_game();
+    }
+    gfx_vsync();
+}

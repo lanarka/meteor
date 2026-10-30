@@ -1,0 +1,6 @@
+program "pixel - plots one opaque red pixel at (10, 20) and keeps the window alive (port of pixel.quartz, uses lib/gfx)";
+import "../lib/gfx.obj";
+import "../lib/sys.obj";
+
+gfx_pixel(10, 20, COLOR_RED);
+sys_idle();

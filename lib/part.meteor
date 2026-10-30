@@ -1,0 +1,402 @@
+module part;
+import "disk.obj";
+import "math.obj";
+import "str.obj";
+include "../inc/std.quartz";
+
+/// The partition table: it divides a disk into logical disks, called volumes (the first is "volume0").
+/// Sector 0 of the disk is reserved for a boot loader, sector 1 holds the table:
+///
+///   byte 0 .. 7     volume 0: [i32 BeginLBA] [i32 EndLBA]   (little endian)
+///   byte 8 .. 15    volume 1: [i32 BeginLBA] [i32 EndLBA]
+///   ...             64 volumes at most; a slot of 8 zero bytes is free
+///
+/// BeginLBA is the first sector of the volume and EndLBA the last one (included), so the volume has
+/// End - Begin + 1 sectors. Volumes lie between sector 2 and the end of the disk and do not overlap. The
+/// numbers of the volumes never change: deleting volume0 leaves volume1 where it is. The table does not say
+/// what is on a volume - a volume may hold any file system (lib/fs recognises its own by the magic number in
+/// the first sector of the volume, see part_probe_magic).
+///
+///   part_init(std.BUS_DEV_DISK0);                  // an empty table (the old volumes are forgotten)
+///   v = part_add_size(std.BUS_DEV_DISK0, 1000);    // volume0: 1000 sectors in the first free place
+///   part_load(std.BUS_DEV_DISK0);
+///   for (i of 0 .. PART_MAX) { if (part_entry(i) == 1) { ... part_begin, part_end, part_size ... } }
+///
+/// Every function that can fail returns 0 (or -1) and leaves the reason in part_error, see part_text().
+/// RAM: about 1 KB.
+
+const PART_TABLE_LBA = 1;
+const PART_MAX = 64;
+const PART_FIRST_LBA = 2;
+/// the magic number at byte 16 of the first sector of a volume that holds lib/fs
+const PART_MAGIC_MFAT = 0x5441464D;
+
+const PART_OK = 0;
+const PART_ERR_IO = 1;
+const PART_ERR_BAD_TABLE = 2;
+const PART_ERR_RANGE = 3;
+const PART_ERR_OVERLAP = 4;
+const PART_ERR_NO_SLOT = 5;
+const PART_ERR_NO_SPACE = 6;
+const PART_ERR_NO_VOLUME = 7;
+const PART_ERR_BAD_SIZE = 8;
+const PART_ERR_NO_DISK = 9;
+
+/// the reason of the last failure (PART_ERR_*), 0 after a success
+let part_error: u32;
+/// the volume that part_entry() / part_get() found last: first sector, last sector (included), sectors
+let part_begin: u32;
+let part_end: u32;
+let part_size: u32;
+/// the disk whose table is loaded
+let part_dev: u32;
+let part_loaded: u32;
+let part_tab: u8[512];
+let part_sec: u8[512];
+let part_gap_start: u32;
+let part_messages: u8[] = "OK\0Disk error\0Bad partition table\0Outside of the disk\0Overlaps another volume\0No free slot in the table\0Not enough free space\0No such volume\0Bad size\0No disk";
+let part_name_none: u8[] = "empty";
+let part_name_mfat: u8[] = "MFAT";
+let part_name_other: u8[] = "unknown";
+
+/// text of an error code
+function part_text(code: u32): u32 {
+    let a: u32;
+    let k: u32;
+
+    a = addr(part_messages);
+    for (k of 0 .. math_umin(code, PART_ERR_NO_DISK)) {
+        a = a + str_len(a) + 1;
+    }
+    return a;
+}
+
+/// the first sector of entry i is at byte i * 8: begin and end
+function part_slot_begin(i: u32): i32 {
+    return peek(addr(part_tab) + i * 8, i32);
+}
+
+function part_slot_end(i: u32): i32 {
+    return peek(addr(part_tab) + i * 8 + 4, i32);
+}
+
+function part_slot_used(i: u32): u32 {
+    if (part_slot_begin(i) == 0 && part_slot_end(i) == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+function part_slot_set(i: u32, b: u32, e: u32) {
+    poke(addr(part_tab) + i * 8, u32, b);
+    poke(addr(part_tab) + i * 8 + 4, u32, e);
+}
+
+/// 1 when the volume [b, e] collides with a used slot (the slot `skip` is ignored)
+function part_collides(b: u32, e: u32, skip: u32): u32 {
+    let i: u32;
+
+    for (i of 0 .. PART_MAX) {
+        if (i != skip && part_slot_used(i) == 1) {
+            if (b <= u32(part_slot_end(i)) && e >= u32(part_slot_begin(i))) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// Reads and checks the table of a disk; the other functions that take a disk call it themselves,
+/// call it yourself before part_entry() / part_count().
+function part_load(dev: u32): u32 {
+    let i: u32;
+    let b: i32;
+    let e: i32;
+    let total: u32;
+
+    part_error = 0;
+    part_loaded = 0;
+    if (disk_present(dev) == 0) {
+        part_error = PART_ERR_NO_DISK;
+        return 0;
+    }
+    total = disk_sectors(dev);
+    if (total < 2 || disk_read(dev, PART_TABLE_LBA, addr(part_tab), 1) == 0) {
+        part_error = PART_ERR_IO;
+        return 0;
+    }
+    for (i of 0 .. PART_MAX) {
+        if (part_slot_used(i) == 1) {
+            b = part_slot_begin(i);
+            e = part_slot_end(i);
+            if (b < PART_FIRST_LBA || e < b || u32(e) >= total || part_collides(u32(b), u32(e), i) == 1) {
+                part_error = PART_ERR_BAD_TABLE;
+                return 0;
+            }
+        }
+    }
+    part_dev = dev;
+    part_loaded = 1;
+    return 1;
+}
+
+function part_save(): u32 {
+    if (disk_write(part_dev, PART_TABLE_LBA, addr(part_tab), 1) == 0) {
+        part_error = PART_ERR_IO;
+        return 0;
+    }
+    return 1;
+}
+
+/// Creates an empty partition table (sector 1 is cleared; sector 0 stays untouched).
+function part_init(dev: u32): u32 {
+    part_error = 0;
+    part_loaded = 0;
+    if (disk_present(dev) == 0) {
+        part_error = PART_ERR_NO_DISK;
+        return 0;
+    }
+    if (disk_sectors(dev) < 3) {
+        part_error = PART_ERR_BAD_SIZE;
+        return 0;
+    }
+    memset(addr(part_tab), 0, 512);
+    part_dev = dev;
+    if (part_save() == 0) {
+        return 0;
+    }
+    part_loaded = 1;
+    return 1;
+}
+
+/// Looks at the volume i of the loaded table: 1 and part_begin / part_end / part_size are set, or 0 when
+/// the slot is free.
+function part_entry(i: u32): u32 {
+    if (part_loaded == 0 || i >= PART_MAX || part_slot_used(i) == 0) {
+        return 0;
+    }
+    part_begin = u32(part_slot_begin(i));
+    part_end = u32(part_slot_end(i));
+    part_size = part_end - part_begin + 1;
+    return 1;
+}
+
+/// like part_entry() but loads the table first and reports a missing volume in part_error
+function part_get(dev: u32, i: u32): u32 {
+    if (part_load(dev) == 0) {
+        return 0;
+    }
+    if (part_entry(i) == 0) {
+        part_error = PART_ERR_NO_VOLUME;
+        return 0;
+    }
+    return 1;
+}
+
+/// number of volumes in the loaded table
+function part_count(): u32 {
+    let i: u32;
+    let n: u32;
+
+    n = 0;
+    if (part_loaded == 1) {
+        for (i of 0 .. PART_MAX) {
+            n = n + part_slot_used(i);
+        }
+    }
+    return n;
+}
+
+/// the number of the first free slot, or -1
+function part_free_slot(): i32 {
+    let i: u32;
+
+    for (i of 0 .. PART_MAX) {
+        if (part_slot_used(i) == 0) {
+            return i32(i);
+        }
+    }
+    return -1;
+}
+
+/// Adds the volume [begin, end] (both sectors belong to it) and returns its number, or -1.
+function part_add(dev: u32, begin: u32, end: u32): i32 {
+    let slot: i32;
+
+    if (part_load(dev) == 0) {
+        return -1;
+    }
+    if (begin < PART_FIRST_LBA || end < begin || end >= disk_sectors(dev)) {
+        part_error = PART_ERR_RANGE;
+        return -1;
+    }
+    if (part_collides(begin, end, PART_MAX) == 1) {
+        part_error = PART_ERR_OVERLAP;
+        return -1;
+    }
+    slot = part_free_slot();
+    if (slot < 0) {
+        part_error = PART_ERR_NO_SLOT;
+        return -1;
+    }
+    part_slot_set(u32(slot), begin, end);
+    if (part_save() == 0) {
+        return -1;
+    }
+    return slot;
+}
+
+/// the first sector where `size` sectors fit between the volumes (the table must be loaded), or 0
+function part_find_gap(size: u32): u32 {
+    let s: u32;
+    let i: u32;
+    let moved: u32;
+    let total: u32;
+
+    total = disk_sectors(part_dev);
+    s = PART_FIRST_LBA;
+    loop {
+        if (s + size > total) {
+            return 0;
+        }
+        moved = 0;
+        for (i of 0 .. PART_MAX) {
+            if (part_slot_used(i) == 1 && u32(part_slot_begin(i)) < s + size && u32(part_slot_end(i)) >= s) {
+                s = u32(part_slot_end(i)) + 1;
+                moved = 1;
+            }
+        }
+        if (moved == 0) {
+            return s;
+        }
+    }
+    return 0;
+}
+
+/// Adds a volume of `size` sectors in the first free place that is big enough; returns its number or -1.
+function part_add_size(dev: u32, size: u32): i32 {
+    let s: u32;
+
+    if (part_load(dev) == 0) {
+        return -1;
+    }
+    if (size == 0) {
+        part_error = PART_ERR_BAD_SIZE;
+        return -1;
+    }
+    s = part_find_gap(size);
+    if (s == 0) {
+        part_error = PART_ERR_NO_SPACE;
+        return -1;
+    }
+    return part_add(dev, s, s + size - 1);
+}
+
+/// the largest run of sectors that no volume uses (the table must be loaded)
+function part_largest_gap(): u32 {
+    let i: u32;
+    let j: u32;
+    let start: u32;
+    let stop: u32;
+    let best: u32;
+    let total: u32;
+
+    total = disk_sectors(part_dev);
+    best = 0;
+    /// a gap starts at sector 2 or right after a volume and runs to the next volume or to the disk end
+    for (i of 0 .. PART_MAX + 1) {
+        start = PART_FIRST_LBA;
+        if (i < PART_MAX) {
+            if (part_slot_used(i) == 0) {
+                continue;
+            }
+            start = u32(part_slot_end(i)) + 1;
+        }
+        if (start >= total || part_collides(start, start, PART_MAX) == 1) {
+            continue;
+        }
+        stop = total;
+        for (j of 0 .. PART_MAX) {
+            if (part_slot_used(j) == 1 && u32(part_slot_begin(j)) >= start && u32(part_slot_begin(j)) < stop) {
+                stop = u32(part_slot_begin(j));
+            }
+        }
+        best = math_umax(best, stop - start);
+    }
+    return best;
+}
+
+/// all sectors that no volume uses (the table must be loaded)
+function part_free_sectors(): u32 {
+    let i: u32;
+    let used: u32;
+
+    used = 0;
+    for (i of 0 .. PART_MAX) {
+        if (part_slot_used(i) == 1) {
+            used = used + u32(part_slot_end(i)) - u32(part_slot_begin(i)) + 1;
+        }
+    }
+    return disk_sectors(part_dev) - PART_FIRST_LBA - used;
+}
+
+/// Deletes a volume from the table (its numbers do not shift). With wipe = 1 the first sector of the
+/// volume is cleared too, so that no file system header survives there. The contents of the other
+/// sectors are not touched.
+function part_delete(dev: u32, i: u32, wipe: u32): u32 {
+    if (part_get(dev, i) == 0) {
+        return 0;
+    }
+    if (wipe == 1) {
+        memset(addr(part_sec), 0, 512);
+        if (disk_write(dev, part_begin, addr(part_sec), 1) == 0) {
+            part_error = PART_ERR_IO;
+            return 0;
+        }
+    }
+    part_slot_set(i, 0, 0);
+    return part_save();
+}
+
+/// Moves the last sector of a volume (the first one stays): a bigger volume needs free room behind it, a
+/// smaller one gives sectors back. The data is not touched - a file system on the volume is neither moved
+/// nor resized (see fs_volume_resize, which also takes care of that).
+function part_resize(dev: u32, i: u32, new_end: u32): u32 {
+    if (part_get(dev, i) == 0) {
+        return 0;
+    }
+    if (new_end < part_begin || new_end >= disk_sectors(dev)) {
+        part_error = PART_ERR_RANGE;
+        return 0;
+    }
+    if (part_collides(part_begin, new_end, i) == 1) {
+        part_error = PART_ERR_OVERLAP;
+        return 0;
+    }
+    part_slot_set(i, part_begin, new_end);
+    return part_save();
+}
+
+/// The number that the first sector of the volume holds at byte 16: the magic number of the file system on
+/// it (PART_MAGIC_MFAT for lib/fs), 0 for a volume that was never formatted or cannot be read.
+function part_probe_magic(dev: u32, i: u32): u32 {
+    if (part_get(dev, i) == 0) {
+        return 0;
+    }
+    if (disk_read(dev, part_begin, addr(part_sec), 1) == 0) {
+        part_error = PART_ERR_IO;
+        return 0;
+    }
+    return peek(addr(part_sec) + 16, u32);
+}
+
+/// the name of the file system that owns a magic number: "empty", "MFAT" or "unknown"
+function part_fs_name(magic: u32): u32 {
+    if (magic == 0) {
+        return addr(part_name_none);
+    }
+    if (magic == PART_MAGIC_MFAT) {
+        return addr(part_name_mfat);
+    }
+    return addr(part_name_other);
+}

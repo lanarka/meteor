@@ -1,0 +1,16 @@
+program "net - network card test: sends one 6 byte packet (version 1 + 'hello'), then every frame tries to receive a packet and prints the byte count and the device status (u8; 255 = failure) (port of net.quartz, uses lib/net)";
+import "../lib/net.obj";
+import "../lib/sys.obj";
+
+let packet: u8[] = [1, 'h', 'e', 'l', 'l', 'o'];
+let recv_buf: u8[6];
+
+/// send the packet: the result is the number of bytes sent, or -1 on failure
+debug(u8(net_send(addr(packet), sizeof(packet))));
+loop {
+    /// receive: bytes received (0 = nothing waiting), or -1 on failure
+    debug(u8(net_recv(addr(recv_buf), sizeof(recv_buf))));
+    /// status of the last send/recv
+    debug(u8(net_status()));
+    sys_vsync();
+}

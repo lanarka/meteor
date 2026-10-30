@@ -1,0 +1,38 @@
+program "plasma - a classic demo effect in text mode: every cell of the 80x30 grid is a space with a background colour taken from the sum of three sine waves (lib/math fixed point sin) and walked round the rainbow with color_hue (lib/colors). A frame is too short for 2400 cells, so 400 cells are recomputed per frame; the whole screen refreshes about ten times a second. Press any key to stop. (lib/text, lib/math, lib/input)";
+import "../lib/text.obj";
+import "../lib/input.obj";
+import "../lib/math.obj";
+
+const COLS = 80;
+const ROWS = 30;
+const CELLS = COLS * ROWS;
+const BATCH = 400;
+
+let cell: u32;
+let t: i32;
+let k: u32;
+let x: i32;
+let y: i32;
+let v: i32;
+
+text_clear();
+text_cursor(0);
+loop {
+    kbd_poll();
+    if (kbd_any() == 1) {
+        halt;
+    }
+    for (k of 0 .. BATCH) {
+        x = i32(cell % COLS);
+        y = i32(cell / COLS);
+        /// three waves: horizontal, vertical and diagonal; each is -256 .. 256, the sum -768 .. 768
+        v = math_sin(x * 5 + t) + math_sin(y * 9 + t * 2) + math_sin((x + y) * 4 - t);
+        text_put(u32(x), u32(y), 32, COLOR_BLACK, color_hue(u32((v + 768) / 6 + t)));
+        cell++;
+        if (cell == CELLS) {
+            cell = 0;
+            t = t + 3;
+        }
+    }
+    sys_vsync();
+}

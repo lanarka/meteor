@@ -1,0 +1,14 @@
+program "cursortxt - a text-mode mouse cursor: a semi-transparent block over the cell under the mouse (port of cursortxt.quartz, uses lib/input + lib/tui)";
+import "../lib/input.obj";
+import "../lib/tui.obj";
+import "../lib/sys.obj";
+
+/// text-mode mouse coordinates for the whole run - stage that once
+mouse_mode(1);
+loop {
+    text_put(1, 2, 65, COLOR_WHITE, COLOR_BLACK);
+    mouse_poll();
+    tui_cursor(u32(mouse_x), u32(mouse_y));
+    sys_vsync();
+    text_clear();
+}

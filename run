@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# ./run <example> [quartz options...]
+# Compiles examples/<example>.meteor and starts it in the Quartz VM.
+# Build the libraries first with ./build-modules. Extra options go to quartz, e.g.
+#   ./run lake --disk0 boot.img        ./run snake --videomode 2
+
+if [ -z "$1" ]; then
+    echo "usage: ./run <example> [quartz options...]"
+    exit 1
+fi
+
+name="$1"
+shift
+src="examples/$name.meteor"
+if [ ! -f "$src" ]; then
+    echo "no such example: $name (looked in examples/)"
+    exit 1
+fi
+
+mkdir -p dist
+python3 meteor/frontend.py "$src" -o "dist/$name.json" &&
+python3 meteor/bsontool.py json2bson "dist/$name.json" -o "dist/$name.obj" &&
+python3 meteor/backend.py "dist/$name.obj" -o "dist/$name.quartz" &&
+python3 qasm/qasm.py "dist/$name.quartz" "dist/$name.bin" &&
+quartz "dist/$name.bin" --ram 8388608 "$@"

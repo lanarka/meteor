@@ -1,0 +1,66 @@
+program "primes - the sieve of Eratosthenes up to 1000, the primes printed as a table (lib/text), plus a few statistics";
+import "../lib/text.obj";
+import "../lib/sys.obj";
+
+const LIMIT = 1000;
+const PER_ROW = 12;
+
+let composite: u8[LIMIT + 1];
+let i: u32;
+let j: u32;
+let n: u32;
+let sum: u32;
+let twins: u32;
+let last: u32;
+let s_title: u8[] = "Primes up to 1000";
+let s_count: u8[] = "count: ";
+let s_sum: u8[] = "   sum: ";
+let s_twins: u8[] = "   twin pairs: ";
+
+/// the sieve: cross out the multiples of every prime up to sqrt(LIMIT)
+composite[0] = 1;
+composite[1] = 1;
+i = 2;
+while (i * i <= LIMIT) {
+    if (composite[i] == 0) {
+        j = i * i;
+        while (j <= LIMIT) {
+            composite[j] = 1;
+            j = j + i;
+        }
+    }
+    i++;
+}
+text_clear();
+text_color(COLOR_CYAN, COLOR_BLACK);
+text_print_at(2, 0, addr(s_title));
+text_color(COLOR_WHITE, COLOR_BLACK);
+text_goto(0, 2);
+n = 0;
+last = 0;
+for (i of 2 .. LIMIT + 1) {
+    if (composite[i] == 0) {
+        if (last != 0 && i - last == 2) {
+            twins++;
+            text_color(COLOR_YELLOW, COLOR_BLACK);
+        } else {
+            text_color(COLOR_WHITE, COLOR_BLACK);
+        }
+        text_print_uint_pad(i, 6, 32);
+        last = i;
+        sum = sum + i;
+        n++;
+        if (n % PER_ROW == 0) {
+            text_putc(10);
+        }
+    }
+}
+text_color(COLOR_GREEN, COLOR_BLACK);
+text_goto(0, text_y + 2);
+text_print(addr(s_count));
+text_print_uint(n);
+text_print(addr(s_sum));
+text_print_uint(sum);
+text_print(addr(s_twins));
+text_print_uint(twins);
+sys_idle();

@@ -1,0 +1,241 @@
+program "tour - a guided tour of the Meteor language: operators and casts, floats, arrays, strings, maps, functions, switch, loops with break / continue, and raw memory. Every line prints 'what = result' on the console, so you can compare it with the source. (lib/console, lib/str, lib/math, lib/arr)";
+import "../lib/console.obj";
+import "../lib/arr.obj";
+
+const N = 8;
+const BIG = 4000000000;
+
+let data: i32[N] = [5, 3, 9, -1, 7, 2, 8, 4];
+let word: u8[] = "meteor";
+let word_copy: u8[16];
+let counts: map<u8, u32>[16];
+let scratch: u8[16] = fill(0);
+let k: u8;
+let i: u32;
+let j: u32;
+let n: u32;
+let total: i32;
+let x: f32;
+let label: u8[24];
+let s_sep: u8[] = " = ";
+let s_more: u8[] = "-- press any key --";
+let sections: u32;
+
+/// print "label = value"
+function show(name: u32, value: i32) {
+    console_print(name);
+    console_print(addr(s_sep));
+    console_print_int(value);
+    console_putc(10);
+}
+
+/// every section after the first starts on a clean screen
+function title(name: u32) {
+    if (sections > 0) {
+        console_color(COLOR_GRAY, COLOR_BLACK);
+        console_print(addr(s_more));
+        console_wait_key();
+        console_clear();
+    }
+    sections++;
+    console_color(COLOR_YELLOW, COLOR_BLACK);
+    console_println(name);
+    console_color(COLOR_WHITE, COLOR_BLACK);
+}
+
+/// Euclid's algorithm - a plain loop, the language has no recursion
+function gcd(a: u32, b: u32): u32 {
+    let t: u32;
+
+    while (b != 0) {
+        t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+function factorial(n: u32): u32 {
+    let r: u32;
+
+    r = 1;
+    for (i of 2 .. n + 1) {
+        r = r * i;
+    }
+    return r;
+}
+
+function fibonacci(n: u32): u32 {
+    let a: u32;
+    let b: u32;
+    let t: u32;
+    let c: u32;
+
+    a = 0;
+    b = 1;
+    for (c of 0 .. n) {
+        t = a + b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+function sign_name(v: i32): u32 {
+    switch (v) {
+        case 0: {
+            return addr(word);
+        }
+        default: {
+            return addr(word_copy);
+        }
+    }
+    return 0;
+}
+
+console_init();
+
+let t1: u8[] = "-- operators --";
+title(addr(t1));
+let t2: u8[] = "7 / 2";
+show(addr(t2), 7 / 2);
+let t3: u8[] = "-7 / 2   (cut towards 0)";
+show(addr(t3), -7 / 2);
+let t4: u8[] = "-7 % 3";
+show(addr(t4), -7 % 3);
+let t5: u8[] = "1 << 10";
+show(addr(t5), 1 << 10);
+let t6: u8[] = "0xF0 | 0x0F";
+show(addr(t6), 0xF0 | 0x0F);
+let t7: u8[] = "0xFF & 0x3C";
+show(addr(t7), 0xFF & 0x3C);
+let t8: u8[] = "0xFF ^ 0x0F";
+show(addr(t8), 0xFF ^ 0x0F);
+let t9: u8[] = "2 + 3 * 4 - 6 / 2";
+show(addr(t9), 2 + 3 * 4 - 6 / 2);
+
+let t10: u8[] = "-- casts --";
+title(addr(t10));
+let t11: u8[] = "u8(300)";
+show(addr(t11), i32(u8(300)));
+let t12: u8[] = "i8(200)";
+show(addr(t12), i32(i8(200)));
+let t13: u8[] = "i32(u32(BIG))";
+show(addr(t13), i32(u32(BIG)));
+
+let t14: u8[] = "-- floats (via lib/math) --";
+title(addr(t14));
+x = math_sqrtf(2.0);
+let t15: u8[] = "sqrt(2) * 1000";
+show(addr(t15), math_ftoi(x * 1000.0));
+let t16: u8[] = "floor(-2.5)";
+show(addr(t16), math_ffloor(-2.5));
+let t17: u8[] = "itof(7) / 2.0 * 10";
+show(addr(t17), math_ftoi(math_itof(7) / 2.0 * 10.0));
+
+let t18: u8[] = "-- arrays --";
+title(addr(t18));
+total = 0;
+for (i of 0 .. len(data)) {
+    total = total + data[i];
+}
+let t19: u8[] = "sum of data";
+show(addr(t19), total);
+/// bubble sort written out; lib/arr has arr_sort_i32 for it
+for (i of 0 .. N - 1) {
+    for (j of 0 .. N - 1 - i) {
+        if (data[j] > data[j + 1]) {
+            total = data[j];
+            data[j] = data[j + 1];
+            data[j + 1] = total;
+        }
+    }
+}
+let t20: u8[] = "smallest after sorting";
+show(addr(t20), data[0]);
+let t21: u8[] = "largest after sorting";
+show(addr(t21), data[N - 1]);
+let t22: u8[] = "binary search for 7";
+show(addr(t22), arr_bsearch_i32(addr(data), N, 7));
+
+let t23: u8[] = "-- strings --";
+title(addr(t23));
+let t24: u8[] = "length of 'meteor'";
+show(addr(t24), i32(str_len(addr(word))));
+str_copy(addr(word_copy), addr(word));
+str_upper(addr(word_copy));
+console_println(addr(word_copy));
+let t25: u8[] = "index of 't'";
+show(addr(t25), str_find_c(addr(word), 't'));
+let t26: u8[] = "atoi('-1234abc')";
+let t27: u8[] = "-1234abc";
+show(addr(t26), str_atoi(addr(t27)));
+
+let t28: u8[] = "-- map: how often does each digit occur in 3141592653? --";
+title(addr(t28));
+n = 3141592653;
+while (n != 0) {
+    k = u8(n % 10);
+    counts[k] = get(counts, k, 0) + 1;
+    n = n / 10;
+}
+for (i of 0 .. 10) {
+    if (has(counts, u8(i))) {
+        console_putc(48 + i);
+        console_print(addr(s_sep));
+        console_print_uint(counts[u8(i)]);
+        console_putc(32);
+    }
+}
+console_putc(10);
+
+let t29: u8[] = "-- functions, switch, loops --";
+title(addr(t29));
+let t30: u8[] = "gcd(1071, 462)";
+show(addr(t30), i32(gcd(1071, 462)));
+let t31: u8[] = "10!";
+show(addr(t31), i32(factorial(10)));
+let t32: u8[] = "fibonacci(30)";
+show(addr(t32), i32(fibonacci(30)));
+/// break 2 leaves both loops: the first pair (a, b) with a * b == 91
+n = 0;
+for (i of 2 .. 20) {
+    for (j of i .. 20) {
+        if (i * j == 91) {
+            n = i * 100 + j;
+            break 2;
+        }
+    }
+}
+let t33: u8[] = "first a*b==91 as a*100+b";
+show(addr(t33), i32(n));
+/// continue: add only the odd numbers
+total = 0;
+for (i of 1 .. 11) {
+    if (i % 2 == 0) {
+        continue;
+    }
+    total = total + i32(i);
+}
+let t34: u8[] = "sum of the odd numbers 1..10";
+show(addr(t34), total);
+/// do-while runs its body at least once
+n = 1;
+do {
+    n = n * 3;
+} while (n < 100);
+let t35: u8[] = "first power of 3 above 100";
+show(addr(t35), i32(n));
+
+let t36: u8[] = "-- raw memory --";
+title(addr(t36));
+memset(addr(scratch), 0xAB, 4);
+poke(addr(scratch) + 4, u32, 0x11223344);
+let t37: u8[] = "peek u8 at 0";
+show(addr(t37), i32(peek(addr(scratch), u8)));
+let t38: u8[] = "peek u8 at 4 (little endian)";
+show(addr(t38), i32(peek(addr(scratch) + 4, u8)));
+memcpy(addr(scratch) + 8, addr(scratch), 4);
+let t39: u8[] = "peek u32 at 8";
+show(addr(t39), i32(peek(addr(scratch) + 8, u32)));
+console_wait_key();

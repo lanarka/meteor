@@ -1,0 +1,245 @@
+module text;
+import "colors.obj";
+import "sys.obj";
+include "../inc/std.quartz";
+
+/// Text mode terminal with a software cursor (text_x / text_y). Everything that prints goes through
+/// text_putc(), which understands \n \r \t and \b. The cursor wraps to the top at the bottom of the
+/// screen - for a real scrolling terminal see lib/console.
+
+let text_x: u32;
+let text_y: u32;
+let text_cols: u32;
+let text_rows: u32;
+let text_fg: u32 = COLOR_WHITE;
+let text_bg: u32 = COLOR_BLACK;
+let text_digits: u8[12];
+
+/// writes a value to a port of the text device (low level)
+function text_out(port: u32, value: u32) {
+    out(std.BUS_DEV_VIDEO_TEXT, port, value);
+}
+
+/// read the size of the terminal again (after a video mode change)
+function text_init() {
+    text_cols = in(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_COLS);
+    text_rows = in(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_ROWS);
+}
+
+/// switch the video mode: 1 = 80x30, 2 = 128x48, 3 = 160x60 characters
+function text_set_mode(mode: u32) {
+    sys_video(mode);
+    text_init();
+    text_x = 0;
+    text_y = 0;
+}
+
+/// clears the screen and moves the cursor to the top left corner
+function text_clear() {
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CLEAR, 0);
+    text_x = 0;
+    text_y = 0;
+}
+
+/// sets the colours used by the printing functions (0xAABBGGRR)
+function text_color(fg: u32, bg: u32) {
+    text_fg = fg;
+    text_bg = bg;
+}
+
+/// moves the text cursor to the column x and the row y
+function text_goto(x: u32, y: u32) {
+    text_x = x;
+    text_y = y;
+}
+
+/// one cell at an absolute position, the cursor and the current colours are not touched
+function text_put(x: u32, y: u32, cp: u32, fg: u32, bg: u32) {
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, x);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, y);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_CODEPOINT, cp);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_FG, fg);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_BG, bg);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CHAR, 0);
+}
+
+/// 0 = hidden, 1 = block, 2 = bar
+function text_cursor(style: u32) {
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CURENA, style);
+}
+
+/// move the blinking hardware cursor to the text position
+function text_cursor_sync() {
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_X, text_x);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_PORT_Y, text_y);
+    out(std.BUS_DEV_VIDEO_TEXT, std.VTXT_CMD_CURSET, 0);
+}
+
+/// moves the cursor to the start of the next row (wraps to the top at the bottom of the screen)
+function text_newline() {
+    text_x = 0;
+    text_y++;
+    if (text_y >= text_rows) {
+        text_y = 0;
+    }
+}
+
+/// prints one character at the cursor; understands 10 (newline), 13, 9 (tab) and 8 (backspace)
+function text_putc(c: u32) {
+    switch (c) {
+        case 10: {
+            text_newline();
+        }
+        case 13: {
+            text_x = 0;
+        }
+        case 9: {
+            text_x = text_x + 4 - text_x % 4;
+        }
+        case 8: {
+            /// backspace: step back and erase the character
+            if (text_x > 0) {
+                text_x--;
+                text_put(text_x, text_y, 32, text_fg, text_bg);
+            }
+        }
+        default: {
+            if (text_x >= text_cols) {
+                text_newline();
+            }
+            text_put(text_x, text_y, c, text_fg, text_bg);
+            text_x++;
+        }
+    }
+}
+
+/// c repeated n times
+function text_repeat(c: u32, n: u32) {
+    while (n > 0) {
+        text_putc(c);
+        n--;
+    }
+}
+
+/// prints a zero terminated string
+function text_print(s: u32) {
+    let c: u32;
+
+    c = u32(peek(s, u8));
+    while (c != 0) {
+        text_putc(c);
+        s++;
+        c = u32(peek(s, u8));
+    }
+}
+
+/// prints a zero terminated string and a newline
+function text_println(s: u32) {
+    text_print(s);
+    text_putc(10);
+}
+
+/// prints a string at the column x and the row y
+function text_print_at(x: u32, y: u32, s: u32) {
+    text_goto(x, y);
+    text_print(s);
+}
+
+/// a rectangle of the current background colour filled with the character c
+function text_fill(x: u32, y: u32, w: u32, h: u32, c: u32) {
+    let i: u32;
+    let j: u32;
+
+    for (j of y .. y + h) {
+        for (i of x .. x + w) {
+            text_put(i, j, c, text_fg, text_bg);
+        }
+    }
+}
+
+/// unsigned number right aligned in a field of `width` characters, padded with the character pad
+function text_print_uint_pad(n: u32, width: u32, pad: u32) {
+    let i: u32;
+
+    i = 0;
+    do {
+        text_digits[i] = u8(n % 10) + 48;
+        n = n / 10;
+        i++;
+    } while (n != 0);
+    while (width > i) {
+        text_putc(pad);
+        width--;
+    }
+    while (i > 0) {
+        i--;
+        text_putc(u32(text_digits[i]));
+    }
+}
+
+/// unsigned decimal number
+function text_print_uint(n: u32) {
+    text_print_uint_pad(n, 0, 32);
+}
+
+/// signed decimal number
+function text_print_int(v: i32) {
+    if (v < 0) {
+        text_putc(45);
+        v = -v;
+    }
+    text_print_uint(u32(v));
+}
+
+/// signed number right aligned in a field of `width` characters
+function text_print_int_pad(v: i32, width: u32, pad: u32) {
+    let digits: u32;
+    let t: u32;
+
+    t = u32(v);
+    digits = 1;
+    if (v < 0) {
+        t = u32(-v);
+        digits = 2;
+    }
+    while (t >= 10) {
+        t = t / 10;
+        digits++;
+    }
+    while (width > digits) {
+        text_putc(pad);
+        width--;
+    }
+    text_print_int(v);
+}
+
+/// the lowest `digits` hex digits of n (capital letters, no prefix)
+function text_print_hex_n(n: u32, digits: u32) {
+    let i: u32;
+    let d: u32;
+
+    for (i of digits .. 0 step -1) {
+        d = (n >> ((i - 1) * 4)) & 15;
+        if (d < 10) {
+            text_putc(d + 48);
+        } else {
+            text_putc(d + 55);
+        }
+    }
+}
+
+/// 8 hex digits
+function text_print_hex(n: u32) {
+    text_print_hex_n(n, 8);
+}
+
+/// n as binary digits, exactly `digits` of them
+function text_print_bin(n: u32, digits: u32) {
+    let i: u32;
+
+    for (i of digits .. 0 step -1) {
+        text_putc(48 + ((n >> (i - 1)) & 1));
+    }
+}
+
+text_init();

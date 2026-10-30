@@ -1,0 +1,83 @@
+program "guess - number guessing game on a scrolling console: the computer thinks of a number 1..100, you get 'higher' / 'lower' hints. Type 0 to give up. (lib/console readline, lib/str atoi, lib/math random)";
+import "../lib/console.obj";
+
+const MAX_NUMBER = 100;
+
+let line: u8[16];
+let secret: i32;
+let guess: i32;
+let tries: u32;
+let finished: u32;
+let s_banner: u8[] = "=== GUESS THE NUMBER ===";
+let s_intro: u8[] = "I am thinking of a number between 1 and 100. (0 = give up)";
+let s_prompt: u8[] = "Your guess? ";
+let s_low: u8[] = "Too low.";
+let s_high: u8[] = "Too high.";
+let s_range: u8[] = "Please type a number from 1 to 100.";
+let s_win1: u8[] = "Correct! You needed ";
+let s_win2: u8[] = " tries.";
+let s_giveup: u8[] = "The number was ";
+let s_great: u8[] = "Excellent - binary search is your friend!";
+let s_again: u8[] = "Play again (y/n)? ";
+
+function new_game() {
+    secret = math_rand(1, MAX_NUMBER);
+    tries = 0;
+    finished = 0;
+    console_println(addr(s_intro));
+}
+
+function ask_again(): u32 {
+    console_print(addr(s_again));
+    console_readline(addr(line), 8);
+    if (line[0] == 'y' || line[0] == 'Y') {
+        return 1;
+    }
+    return 0;
+}
+
+console_init();
+console_color(COLOR_YELLOW, COLOR_BLACK);
+console_println(addr(s_banner));
+console_color(COLOR_WHITE, COLOR_BLACK);
+new_game();
+loop {
+    console_print(addr(s_prompt));
+    console_readline(addr(line), 8);
+    guess = str_atoi(addr(line));
+    if (line[0] == 0) {
+        /// an empty line asks again
+    } else if (str_is_digit(u32(line[0])) == 0) {
+        console_println(addr(s_range));
+    } else if (guess == 0) {
+        console_print(addr(s_giveup));
+        console_print_int(secret);
+        console_putc(10);
+        finished = 1;
+    } else if (guess < 1 || guess > MAX_NUMBER) {
+        console_println(addr(s_range));
+    } else {
+        tries++;
+        if (guess < secret) {
+            console_println(addr(s_low));
+        } else if (guess > secret) {
+            console_println(addr(s_high));
+        } else {
+            console_color(COLOR_GREEN, COLOR_BLACK);
+            console_print(addr(s_win1));
+            console_print_uint(tries);
+            console_println(addr(s_win2));
+            if (tries <= 7) {
+                console_println(addr(s_great));
+            }
+            console_color(COLOR_WHITE, COLOR_BLACK);
+            finished = 1;
+        }
+    }
+    if (finished == 1) {
+        if (ask_again() == 0) {
+            halt;
+        }
+        new_game();
+    }
+}

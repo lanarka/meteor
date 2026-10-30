@@ -1,0 +1,42 @@
+program "Move a square with the arrow keys, Esc quits (lib/input, lib/gfx)";
+import "../lib/gfx.obj";
+import "../lib/input.obj";
+
+const SIZE = 16;
+const STEP = 4;
+const BG = 0xFF000000;
+
+let x: i32 = 320;
+let y: i32 = 240;
+let dx: i32;
+let dy: i32;
+
+gfx_clear(BG);
+gfx_fill_rect(x, y, SIZE, SIZE, COLOR_WHITE);
+loop {
+    kbd_poll();
+    if (kbd_down(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    dx = 0;
+    dy = 0;
+    if (kbd_down(kb.KEY_RIGHT) == 1) {
+        dx = STEP;
+    }
+    if (kbd_down(kb.KEY_LEFT) == 1) {
+        dx = -STEP;
+    }
+    if (kbd_down(kb.KEY_DOWN) == 1) {
+        dy = STEP;
+    }
+    if (kbd_down(kb.KEY_UP) == 1) {
+        dy = -STEP;
+    }
+    if (dx != 0 || dy != 0) {
+        gfx_fill_rect(x, y, SIZE, SIZE, BG);
+        x = math_clamp(x + dx, 0, gfx_w - SIZE);
+        y = math_clamp(y + dy, 0, gfx_h - SIZE);
+        gfx_fill_rect(x, y, SIZE, SIZE, COLOR_WHITE);
+    }
+    gfx_vsync();
+}

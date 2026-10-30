@@ -1,0 +1,136 @@
+program "analog_clock - an analog clock with hour, minute and second hands and a digital readout below it. The hands are placed with the fixed point sin / cos of lib/math (angles are 1/256 turns, 0 = twelve o'clock); the face is repainted only when the second changes. Esc quits. (lib/gfx, lib/gtext, lib/math, lib/rtc, lib/input)";
+import "../lib/gtext.obj";
+import "../lib/rtc.obj";
+import "../lib/input.obj";
+import "../lib/str.obj";
+/// lib/gtext keeps a glyph cache of ~66 KB
+ram(size: 262144);
+
+const CX = 320;
+const CY = 215;
+const R = 190;
+const FACE = 0xFF2A1A10;
+const RIM = 0xFFC0A080;
+
+let text: u8[16];
+let date: u8[24];
+let s_digits: u8[] = "0123456789:";
+let s_date_chars: u8[] = "0123456789 SunMonTueWedThuFriSatJanFebMarAprMayJunJulAugSepOctNovDec";
+let i: u32;
+
+/// point at the angle a (1/256 turns, clockwise from twelve o'clock) and distance r from the centre
+function px(a: i32, r: i32): i32 {
+    return CX + math_sin(a) * r / 256;
+}
+
+function py(a: i32, r: i32): i32 {
+    return CY - math_cos(a) * r / 256;
+}
+
+/// a hand of length r; thickness 1 = thin, 2 = three pixels wide
+function hand(a: i32, r: i32, thick: u32, color: u32) {
+    gfx_line(CX, CY, px(a, r), py(a, r), color);
+    if (thick == 2) {
+        gfx_line(CX + 1, CY, px(a, r) + 1, py(a, r), color);
+        gfx_line(CX - 1, CY, px(a, r) - 1, py(a, r), color);
+        gfx_line(CX, CY + 1, px(a, r), py(a, r) + 1, color);
+        gfx_line(CX, CY - 1, px(a, r), py(a, r) - 1, color);
+    }
+}
+
+function draw_face() {
+    let k: i32;
+
+    gfx_fill_circle(CX, CY, R + 8, RIM);
+    gfx_fill_circle(CX, CY, R + 4, FACE);
+    /// 60 ticks: every fifth one is long and bright
+    for (k of 0 .. 60) {
+        if (k % 5 == 0) {
+            gfx_line(px(k * 256 / 60, R - 18), py(k * 256 / 60, R - 18), px(k * 256 / 60, R), py(k * 256 / 60, R), COLOR_WHITE);
+            gfx_line(px(k * 256 / 60, R - 17) + 1, py(k * 256 / 60, R - 17), px(k * 256 / 60, R) + 1, py(k * 256 / 60, R), COLOR_WHITE);
+        } else {
+            gfx_line(px(k * 256 / 60, R - 7), py(k * 256 / 60, R - 7), px(k * 256 / 60, R), py(k * 256 / 60, R), COLOR_GRAY);
+        }
+    }
+}
+
+/// "HH:MM:SS" in text
+function format_time(h: u32, m: u32, s: u32) {
+    text[0] = u8(48 + h / 10);
+    text[1] = u8(48 + h % 10);
+    text[2] = 58;
+    text[3] = u8(48 + m / 10);
+    text[4] = u8(48 + m % 10);
+    text[5] = 58;
+    text[6] = u8(48 + s / 10);
+    text[7] = u8(48 + s % 10);
+    text[8] = 0;
+}
+
+/// "Fri 16 Oct 2026" in date
+function format_date() {
+    let n: u32;
+
+    n = str_copy(addr(date), rtc_day_name(rtc_weekday()));
+    date[n] = 32;
+    n = n + 1;
+    n = n + str_utoa(rtc_day(), addr(date) + n);
+    date[n] = 32;
+    n = n + 1;
+    n = n + str_copy(addr(date) + n, rtc_month_name(rtc_month()));
+    date[n] = 32;
+    n = n + 1;
+    str_utoa(rtc_year(), addr(date) + n);
+}
+
+function draw_time() {
+    let h: u32;
+    let m: u32;
+    let s: u32;
+    let ha: i32;
+    let ma: i32;
+    let sa: i32;
+
+    h = rtc_hour();
+    m = rtc_minute();
+    s = rtc_second();
+    /// the angles in 1/256 turns: the hour hand also creeps with the minutes, the minute hand with the seconds
+    ha = i32((h % 12) * 256 / 12 + m * 256 / 720);
+    ma = i32(m * 256 / 60 + s * 256 / 3600);
+    sa = i32(s * 256 / 60);
+    gfx_fill_circle(CX, CY, R - 22, FACE);
+    hand(ha, 95, 2, COLOR_WHITE);
+    hand(ma, 140, 2, COLOR_LIGHT_GRAY);
+    hand(sa, 160, 1, COLOR_RED);
+    gfx_fill_circle(CX, CY, 6, COLOR_RED);
+    gfx_fill_circle(CX, CY, 2, COLOR_BLACK);
+    /// the digital readout
+    gfx_fill_rect(0, 428, 640, 52, COLOR_BLACK);
+    format_time(h, m, s);
+    gtext_scale = 2;
+    gtext_center(0, 640, 430, addr(text), COLOR_WHITE);
+    gtext_scale = 1;
+    format_date();
+    gtext_center(0, 640, 464, addr(date), COLOR_GRAY);
+}
+
+gfx_clear(COLOR_BLACK);
+/// The picture is shown at the end of every frame, and a frame lasts for 200 000 instructions at most: what the
+/// program has drawn until then is shown, finished or not. An update that is too long for one frame therefore
+/// flickers (the clock face cleared, the digits not yet drawn). Building the letters is the expensive part, so
+/// the ones that the clock needs are made now, once; later an update takes about 120 000 instructions.
+gtext_scale = 2;
+gtext_prepare(addr(s_digits), COLOR_WHITE);
+gtext_scale = 1;
+gtext_prepare(addr(s_date_chars), COLOR_GRAY);
+draw_face();
+loop {
+    kbd_poll();
+    if (kbd_down(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    if (rtc_second_changed() == 1) {
+        draw_time();
+    }
+    gfx_vsync();
+}

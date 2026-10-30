@@ -1,0 +1,75 @@
+module rtc;
+include "../inc/std.quartz";
+
+/// Real time clock (wall clock date and time of the host).
+
+let rtc_days: u8[] = "Sun\0Mon\0Tue\0Wed\0Thu\0Fri\0Sat";
+let rtc_months: u8[] = "Jan\0Feb\0Mar\0Apr\0May\0Jun\0Jul\0Aug\0Sep\0Oct\0Nov\0Dec";
+let rtc_last_second: i32 = -1;
+
+/// year, e.g. 2026
+function rtc_year(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_YEAR);
+}
+
+/// 1..12
+function rtc_month(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_MONTH);
+}
+
+/// day of the month, 1 .. 31
+function rtc_day(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_DAY);
+}
+
+/// hour, 0 .. 23
+function rtc_hour(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_HOUR);
+}
+
+/// minute, 0 .. 59
+function rtc_minute(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_MINUTE);
+}
+
+/// second, 0 .. 59
+function rtc_second(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_SECOND);
+}
+
+/// 0 = Sunday .. 6 = Saturday
+function rtc_weekday(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_WEEKDAY);
+}
+
+/// millisecond within the second, 0 .. 999
+function rtc_millisecond(): u32 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_MILLISECOND);
+}
+
+/// seconds since 1970-01-01
+function rtc_epoch(): u64 {
+    return in(std.BUS_DEV_RTC, std.RTC_PORT_EPOCH, u64);
+}
+
+/// address of the zero terminated 3 letter name: "Sun" .. "Sat" (wd = 0..6)
+function rtc_day_name(wd: u32): u32 {
+    return addr(rtc_days) + (wd % 7) * 4;
+}
+
+/// address of the zero terminated 3 letter name: "Jan" .. "Dec" (m = 1..12)
+function rtc_month_name(m: u32): u32 {
+    return addr(rtc_months) + ((m + 11) % 12) * 4;
+}
+
+/// 1 the first time it is called in every new second, otherwise 0 (a redraw trigger)
+function rtc_second_changed(): u32 {
+    let s: i32;
+
+    s = i32(rtc_second());
+    if (s != rtc_last_second) {
+        rtc_last_second = s;
+        return 1;
+    }
+    return 0;
+}

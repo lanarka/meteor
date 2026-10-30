@@ -1,0 +1,31 @@
+program "Digital clock (RTC device on the bus, redraws when the second changes; lib/rtc + lib/text)";
+import "../lib/text.obj";
+import "../lib/rtc.obj";
+import "../lib/sys.obj";
+
+let title: u8[] = "Quartz Clock";
+
+text_clear();
+text_color(COLOR_CYAN, COLOR_BLACK);
+text_print_at(2, 1, addr(title));
+loop {
+    if (rtc_second_changed() == 1) {
+        text_color(COLOR_WHITE, COLOR_BLACK);
+        text_goto(2, 3);
+        text_print_uint_pad(rtc_hour(), 2, 48);
+        text_putc(58);
+        text_print_uint_pad(rtc_minute(), 2, 48);
+        text_putc(58);
+        text_print_uint_pad(rtc_second(), 2, 48);
+        text_color(COLOR_GRAY, COLOR_BLACK);
+        text_goto(2, 5);
+        text_print_uint_pad(rtc_year(), 4, 48);
+        text_putc(45);
+        text_print_uint_pad(rtc_month(), 2, 48);
+        text_putc(45);
+        text_print_uint_pad(rtc_day(), 2, 48);
+        text_putc(32);
+        text_print(rtc_day_name(rtc_weekday()));
+    }
+    sys_vsync();
+}

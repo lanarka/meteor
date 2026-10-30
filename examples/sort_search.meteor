@@ -1,0 +1,15 @@
+program "Sort and binary search of an i32 array (lib/arr), results printed with debug";
+import "../lib/arr.obj";
+
+const N = 8;
+
+let data: i32[N] = [5, 3, 9, -1, 7, 2, 8, 4];
+let i: u32;
+
+arr_sort_i32(addr(data), N);
+for (i of 0 .. N) {
+    debug(data[i]);
+}
+debug(-100);
+/// binary search for 7 in the sorted array
+debug(arr_bsearch_i32(addr(data), N, 7));

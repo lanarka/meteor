@@ -1,0 +1,208 @@
+program "diskprep - how to prepare a disk, step by step and without asking: an empty partition table, three volumes, formatting with labels, mount points stored in the volumes, automount, a few files, resizing and deleting volumes, and a consistency check. Everything is printed. Start it with an empty disk image: python3 tools/fstool.py mkimage disk.img 4096; ./run diskprep --disk0 disk.img (it erases the disk!). (lib/part, lib/fs, lib/fsck, lib/console)";
+import "../lib/console.obj";
+import "../lib/fsck.obj";
+ram(size: 131072);
+
+const DISK = std.BUS_DEV_DISK0;
+
+let s_title: u8[] = "== disk preparation ==";
+let s_no_disk: u8[] = "No disk attached. Start with --disk0 <image>.";
+let s_step1: u8[] = "1. empty partition table";
+let s_step2: u8[] = "2. three volumes of 1000, 1500 and 1000 sectors";
+let s_step3: u8[] = "3. format with a label (1 - 48 characters)";
+let s_step4: u8[] = "4. store the mount points in the volumes, mount them all";
+let s_step5: u8[] = "5. write some files";
+let s_step6: u8[] = "6. grow volume 2 by 500 sectors, try to shrink it, check all volumes";
+let s_step7: u8[] = "7. delete volume 2 and show the partition table";
+let s_fail: u8[] = "FAILED: ";
+let s_grown: u8[] = "grown: ";
+let s_refused: u8[] = "shrinking is refused: ";
+let s_ok: u8[] = "ok";
+let s_part_hdr: u8[] = "  vol   begin     end  sectors  holds";
+let s_mounted: u8[] = " volume(s) mounted under /";
+let s_slash: u8[] = "/";
+let s_arrow: u8[] = " -> ";
+let s_bytes_in: u8[] = " bytes in ";
+let s_checked: u8[] = "fsck volume ";
+let s_consistent: u8[] = ": consistent, files / dirs / used / free: ";
+let s_problems: u8[] = ": problems: ";
+let s_label_sys: u8[] = "System";
+let s_label_data: u8[] = "Documents and data";
+let s_label_rest: u8[] = "Scratch space";
+let s_name_sys: u8[] = "SYS";
+let s_name_data: u8[] = "DATA";
+let s_name_tmp: u8[] = "TMP";
+let s_p_readme: u8[] = "/SYS/README.TXT";
+let s_p_docs: u8[] = "/DATA/DOCS";
+let s_p_note: u8[] = "/DATA/DOCS/NOTE.TXT";
+let s_p_junk: u8[] = "/TMP/JUNK.BIN";
+let s_t_readme: u8[] = "Prepared by the diskprep example.\n";
+let s_t_note: u8[] = "A note stored on the DATA volume.\n";
+let s_junk: u8[] = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+let i: u32;
+let v: i32;
+let n: i32;
+let h: i32;
+
+function step(text: u32) {
+    console_color(COLOR_YELLOW, COLOR_BLACK);
+    console_println(text);
+    console_color(COLOR_WHITE, COLOR_BLACK);
+}
+
+/// a step went wrong: say why (a partition table or a file system error) and stop
+function fail() {
+    console_color(COLOR_RED, COLOR_BLACK);
+    console_print(addr(s_fail));
+    if (fs_error != 0 && fs_error != FS_ERR_PART) {
+        console_println(fs_error_text(fs_error));
+    } else {
+        console_println(part_text(part_error));
+    }
+    halt;
+}
+
+function check(ok: u32) {
+    if (ok == 0) {
+        fail();
+    }
+}
+
+/// a function that returns a number or -1
+function check_i(v: i32) {
+    if (v < 0) {
+        fail();
+    }
+}
+
+function show_table() {
+    let k: u32;
+
+    console_println(addr(s_part_hdr));
+    check(part_load(DISK));
+    for (k of 0 .. PART_MAX) {
+        if (part_entry(k) == 1) {
+            console_print_uint(k);
+            console_putc(9);
+            console_print_uint(part_begin);
+            console_putc(9);
+            console_print_uint(part_end);
+            console_putc(9);
+            console_print_uint(part_size);
+            console_putc(9);
+            console_println(part_fs_name(part_probe_magic(DISK, k)));
+            part_load(DISK);
+        }
+    }
+}
+
+function write_file(path: u32, text: u32) {
+    check(fs_write_file(path, text, str_len(text)));
+}
+
+function fsck_volume(vol: u32) {
+    let r: i32;
+
+    r = fsck_run(DISK, vol, 0);
+    console_print(addr(s_checked));
+    console_print_uint(vol);
+    if (r < 0) {
+        fail();
+    } else if (r == 0) {
+        console_print(addr(s_consistent));
+        console_print_uint(fsck_files);
+        console_putc(47);
+        console_print_uint(fsck_dirs);
+        console_putc(47);
+        console_print_uint(fsck_used);
+        console_putc(47);
+        console_print_uint(fsck_free);
+        console_putc(10);
+    } else {
+        console_print(addr(s_problems));
+        console_print_int(r);
+        console_putc(10);
+        console_print(addr(fsck_log));
+    }
+}
+
+console_init();
+console_println(addr(s_title));
+if (disk_present(DISK) == 0) {
+    console_println(addr(s_no_disk));
+    sys_idle();
+}
+
+step(addr(s_step1));
+check(part_init(DISK));
+
+step(addr(s_step2));
+v = part_add_size(DISK, 1000);
+check_i(v);
+v = part_add_size(DISK, 1500);
+check_i(v);
+v = part_add_size(DISK, 1000);
+check_i(v);
+
+step(addr(s_step3));
+check(fs_format(DISK, 0, addr(s_label_sys)));
+check(fs_format(DISK, 1, addr(s_label_data)));
+check(fs_format(DISK, 2, addr(s_label_rest)));
+
+step(addr(s_step4));
+check(fs_set_mountname(DISK, 0, addr(s_name_sys)));
+check(fs_set_mountname(DISK, 1, addr(s_name_data)));
+check(fs_set_mountname(DISK, 2, addr(s_name_tmp)));
+n = i32(fs_automount(DISK));
+console_print_int(n);
+console_print(addr(s_mounted));
+console_putc(10);
+for (i of 0 .. FS_MAX_MOUNTS) {
+    if (fs_mount_get(i) == 1) {
+        console_print(addr(s_slash));
+        console_print(addr(fs_mi_name));
+        console_putc(9);
+        console_println(addr(fs_mi_label));
+    }
+}
+
+step(addr(s_step5));
+write_file(addr(s_p_readme), addr(s_t_readme));
+check(fs_mkdir(addr(s_p_docs)));
+write_file(addr(s_p_note), addr(s_t_note));
+h = fs_open(addr(s_p_junk), FS_WRITE);
+check_i(h);
+for (i of 0 .. 40) {
+    fs_write(u32(h), addr(s_junk), 64);
+}
+check(fs_close(u32(h)));
+console_print_int(fs_file_size(addr(s_p_junk)));
+console_print(addr(s_bytes_in));
+console_println(addr(s_p_junk));
+
+step(addr(s_step6));
+fs_unmount_all();
+check(part_get(DISK, 2));
+console_print(addr(s_grown));
+console_print_uint(part_size);
+check(fs_volume_resize(DISK, 2, part_end + 500));
+check(part_get(DISK, 2));
+console_print(addr(s_arrow));
+console_print_uint(part_size);
+console_putc(10);
+/// the file system on the volume needs its 1000 sectors: a volume cannot become smaller than that
+console_print(addr(s_refused));
+if (fs_volume_resize(DISK, 2, part_end - 600) == 0) {
+    console_println(fs_error_text(fs_error));
+} else {
+    fail();
+}
+fsck_volume(0);
+fsck_volume(1);
+fsck_volume(2);
+
+step(addr(s_step7));
+check(fs_volume_delete(DISK, 2, 1));
+show_table();
+console_println(addr(s_ok));
+sys_idle();

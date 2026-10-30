@@ -1,0 +1,34 @@
+module net;
+include "../inc/std.quartz";
+
+/// Network card: connectionless packets to a host process (quartz --net <socket>).
+
+/// 1 when the card is attached
+function net_present(): u32 {
+    return u32(bus_status(std.BUS_DEV_NETWORK));
+}
+
+/// the largest packet the card can send
+function net_max_packet(): u32 {
+    return in(std.BUS_DEV_NETWORK, std.NET_PORT_MAXPACKET);
+}
+
+/// 1 when a packet is waiting
+function net_waiting(): u32 {
+    return in(std.BUS_DEV_NETWORK, std.NET_PORT_POLL);
+}
+
+/// status of the last send / receive (255 = failure)
+function net_status(): u32 {
+    return in(std.BUS_DEV_NETWORK, std.NET_PORT_STATUS);
+}
+
+/// sends len bytes, returns the number of bytes sent or -1
+function net_send(buf: u32, len: u32): i32 {
+    return i32(outb(std.BUS_DEV_NETWORK, std.NET_CMD_SEND, buf, len));
+}
+
+/// receives at most max bytes, returns the number of bytes (0 = nothing waiting) or -1
+function net_recv(buf: u32, max: u32): i32 {
+    return i32(inb(std.BUS_DEV_NETWORK, std.NET_CMD_RECV, buf, max));
+}

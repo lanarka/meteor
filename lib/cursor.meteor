@@ -1,0 +1,35 @@
+module cursor;
+import "gfx.obj";
+
+/// Mouse cursor for the pixel graphics mode: a 10 x 16 arrow drawn as a sprite (alpha blended,
+/// partly outside of the screen is fine). Call cursor_draw() last in every frame, after the
+/// scene, with the position from mouse_poll():
+///
+///   mouse_poll();
+///   cursor_draw(mouse_x, mouse_y, COLOR_WHITE);
+
+const CURSOR_W = 10;
+const CURSOR_H = 16;
+
+/// the arrow, X = painted pixel, one row per 10 characters
+let cursor_mask: u8[] = raw "X.........XX........XXX.......XXXX......XXXXX.....XXXXXX....XXXXXXX...XXXXXXXX..XXXXXXXXX.XXXXX.....XXX.XX....XX...XX...X.....XX........XX.........XX........XX.";
+let cursor_img: u32[160];
+let cursor_color: u32;
+
+/// draws the arrow with its tip at (x, y) in the given colour
+function cursor_draw(x: i32, y: i32, color: u32) {
+    let i: u32;
+
+    if (color != cursor_color) {
+        /// the sprite is rebuilt only when the colour changes
+        cursor_color = color;
+        for (i of 0 .. 160) {
+            if (cursor_mask[i] == 88) {
+                cursor_img[i] = color;
+            } else {
+                cursor_img[i] = 0;
+            }
+        }
+    }
+    gfx_sprite(x, y, CURSOR_W, CURSOR_H, addr(cursor_img));
+}

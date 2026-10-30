@@ -1,0 +1,15 @@
+program "Hello World in text mode (lib/text)";
+runtime 255;
+import "../lib/text.obj";
+import "../lib/sys.obj";
+
+let msg: u8[] = "Hello, World!\nFrom Meteor\tOK\n";
+
+text_clear();
+text_color(COLOR_YELLOW, COLOR_BLACK);
+text_print(addr(msg));
+text_color(COLOR_GREEN, COLOR_BLACK);
+text_print_int(-12345);
+text_putc(32);
+text_print_hex(0xDEADBEEF);
+sys_idle();

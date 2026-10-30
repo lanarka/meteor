@@ -1,0 +1,85 @@
+program "Conway's Game of Life on a torus, drawn in text mode (lib/text, lib/math)";
+import "../lib/text.obj";
+import "../lib/math.obj";
+import "../lib/sys.obj";
+
+const GW = 32;
+const GH = 14;
+const GEN = 12;
+
+let cur: u8[GW * GH];
+let next: u8[GW * GH];
+let seed_x: i32[] = [16, 17, 15, 16, 16];
+let seed_y: i32[] = [6, 6, 7, 7, 8];
+let label: u8[] = "Generation ";
+let gen: u32;
+let i: i32;
+let x: i32;
+let y: i32;
+
+function neighbors(cx: i32, cy: i32): i32 {
+    let n: i32;
+    let ox: i32;
+    let oy: i32;
+
+    n = 0;
+    for (oy of -1 .. 2) {
+        for (ox of -1 .. 2) {
+            if (ox != 0 || oy != 0) {
+                /// math_wrap is a modulo that also works for -1: the world is a torus
+                n = n + i32(cur[math_wrap(cy + oy, GH) * GW + math_wrap(cx + ox, GW)]);
+            }
+        }
+    }
+    return n;
+}
+
+function life_step() {
+    let xx: i32;
+    let yy: i32;
+    let n: i32;
+    let idx: i32;
+
+    for (yy of 0 .. GH) {
+        for (xx of 0 .. GW) {
+            n = neighbors(xx, yy);
+            idx = yy * GW + xx;
+            if (cur[idx] == 1 && n == 2 || n == 3) {
+                next[idx] = 1;
+            } else {
+                next[idx] = 0;
+            }
+        }
+    }
+    memcpy(addr(cur), addr(next), sizeof(cur));
+}
+
+function life_draw() {
+    let xx: i32;
+    let yy: i32;
+
+    for (yy of 0 .. GH) {
+        for (xx of 0 .. GW) {
+            if (cur[yy * GW + xx] == 1) {
+                text_put(u32(xx), u32(yy), 35, COLOR_GREEN, COLOR_BLACK);
+            } else {
+                text_put(u32(xx), u32(yy), 46, COLOR_GRAY, COLOR_BLACK);
+            }
+        }
+    }
+}
+
+text_clear();
+for (i of 0 .. len(seed_x)) {
+    cur[seed_y[i] * GW + seed_x[i]] = 1;
+}
+for (gen of 0 .. GEN) {
+    life_draw();
+    text_color(COLOR_WHITE, COLOR_BLACK);
+    text_goto(0, GH + 1);
+    text_print(addr(label));
+    text_print_uint_pad(gen, 3, 32);
+    life_step();
+    sys_vsync();
+}
+sys_idle();

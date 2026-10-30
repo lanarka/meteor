@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+# Create the assets. The wallpaper is the only one the calculator needs:
+# its text is drawn with the built-in font of lib/gtext (the font sheets of the first version are gone).
+python3 png2bin.py src/wallpaper.png wallpaper.raw

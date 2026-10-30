@@ -1,0 +1,60 @@
+program "command - a tiny shell (> COMMAND). HELP lists the commands, EXIT halts the VM, CLS clears the screen, ECHO repeats its argument, TIME shows the clock, anything else prints 'Unknown command'. Commands are case insensitive. The line editor (SHIFT, CAPS LOCK, backspace, key auto-repeat) is lib/input, the scrolling screen is lib/console (port of command.quartz)";
+import "../lib/console.obj";
+import "../lib/rtc.obj";
+
+const LINE_MAX = 62;
+
+let line: u8[64];
+let cmd: u8[64];
+let s_prompt: u8[] = "> ";
+let s_banner: u8[] = "QUARTZ LITE SHELL 1.0";
+let s_unknown: u8[] = "Unknown command";
+let s_help: u8[] = "Available commands:\n  HELP   show this text\n  CLS    clear the screen\n  ECHO   print the rest of the line\n  TIME   show the time\n  EXIT   halt the VM";
+let c_help: u8[] = "HELP";
+let c_exit: u8[] = "EXIT";
+let c_cls: u8[] = "CLS";
+let c_echo: u8[] = "ECHO";
+let c_time: u8[] = "TIME";
+
+function print2(v: u32) {
+    if (v < 10) {
+        console_putc(48);
+    }
+    console_print_uint(v);
+}
+
+function show_time() {
+    print2(rtc_hour());
+    console_putc(58);
+    print2(rtc_minute());
+    console_putc(58);
+    print2(rtc_second());
+    console_putc(10);
+}
+
+console_init();
+console_println(addr(s_banner));
+loop {
+    console_print(addr(s_prompt));
+    console_readline(addr(line), LINE_MAX);
+    /// compare an upper case copy, so the commands work in any case
+    str_copy(addr(cmd), addr(line));
+    str_upper(addr(cmd));
+    if (cmd[0] == 0) {
+        /// empty line: just show the prompt again
+    } else if (str_eq(addr(cmd), addr(c_help)) == 1) {
+        console_println(addr(s_help));
+    } else if (str_eq(addr(cmd), addr(c_exit)) == 1) {
+        halt;
+    } else if (str_eq(addr(cmd), addr(c_cls)) == 1) {
+        console_clear();
+    } else if (str_eq(addr(cmd), addr(c_time)) == 1) {
+        show_time();
+    } else if (str_eq(addr(cmd), addr(c_echo)) == 1) {
+        console_putc(10);
+    } else if (str_starts(addr(cmd), addr(c_echo)) == 1 && cmd[4] == 32) {
+        console_println(addr(line) + 5);
+    } else {
+        console_println(addr(s_unknown));
+    }
+}

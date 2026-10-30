@@ -1,0 +1,2402 @@
+module fs;
+import "disk.obj";
+import "part.obj";
+import "rtc.obj";
+import "str.obj";
+import "math.obj";
+include "../inc/std.quartz";
+
+/// A FAT style file system for the volumes of a partitioned disk (lib/part): files, directories,
+/// attributes and the date and time of the last change. Up to FS_MAX_MOUNTS volumes can be in use at the
+/// same time. Everything is written through to the disk at once, so a disk that was unmounted - or just
+/// left - is consistent.
+///
+/// The namespace. There is one tree for all volumes. Its root "/" is virtual: it contains nothing but the
+/// mount points, which are directories with a name of their own, and it cannot be changed. A volume
+/// appears below its mount point:
+///
+///   part_init(std.BUS_DEV_DISK0);                  // once per disk: an empty partition table
+///   v = part_add_size(std.BUS_DEV_DISK0, 2000);    // volume 0
+///   fs_format(std.BUS_DEV_DISK0, v, addr(label));  // a volume needs a label of 1 .. 48 characters
+///   fs_mount(std.BUS_DEV_DISK0, v, addr(name));    // name = "DATA": the volume is now "/DATA"
+///   fs_mkdir(addr(path_docs));                     // "/DATA/DOCS"
+///   h = fs_open(addr(path_file), FS_WRITE);        // "/DATA/DOCS/NOTE.TXT" is created
+///   fs_write(h, addr(text), len);
+///   fs_close(h);                                   // the size and the time are stored now
+///   fs_list_begin(addr(path_docs));
+///   while (fs_list_next() == 1) { ... fs_ent_name, fs_ent_size, fs_ent_date, fs_ent_time ... }
+///
+/// Where the mount points are kept: the table of mounted volumes lives in RAM, but the name a volume likes
+/// to be mounted under is stored in the header of the volume itself (fs_set_mountname). A disk therefore
+/// describes itself and fs_automount() puts all its volumes into the tree without any configuration file; a
+/// volume without such a name is mounted as "D0V1" (disk 0, volume 1). ".." in the root of a volume leads
+/// back to "/". Files cannot be renamed or moved from one volume to another.
+///
+/// Layout of a volume (like FAT16 with 512 byte clusters): reserved sectors (the boot sector of the volume:
+/// bytes 0 .. 15 stay free for a boot loader, the file system header follows at byte 16), the file
+/// allocation table (one u16 per cluster: 0 = free, 0xFFFF = last cluster of a file), then the clusters from
+/// number 2; the root directory is cluster 2 and grows like any other directory. A directory entry has the
+/// 32 bytes of FAT: an 8.3 name, attributes, created / changed / accessed times and dates in the packed FAT
+/// format (2 second resolution, years 1980 - 2107), the first cluster and the size.
+///
+/// Names are 8.3 (NAME.EXT), letters are made upper case, directories are separated by "/". A path without
+/// a leading slash starts in the current directory (fs_chdir); "." and ".." work. No long names, at most
+/// 65 524 clusters (32 MB) per volume, one cluster = one sector. Directories cannot be moved into themselves;
+/// open files cannot be removed or renamed. Every function that can fail returns 0 (or -1) and leaves a
+/// reason in fs_error, see fs_error_text(); lib/fsck checks a volume for consistency.
+///
+/// RAM: about 5 KB. The functions use shared buffers, so the library is not for concurrent use.
+
+const FS_SECTOR = 512;
+const FS_MAX_FILES = 4;
+const FS_MAX_MOUNTS = 4;
+const FS_MAX_CLUSTERS = 65524;
+const FS_LABEL_MAX = 48;
+/// the cluster of the root directory of every volume
+const FS_ROOT = 2;
+/// the made-up "cluster" of the virtual root "/" (the real ones start at 2)
+const FS_VROOT = 1;
+
+/// open modes of fs_open: READ = the file must exist, WRITE = create or empty it, APPEND = create it or
+/// continue at its end, UPDATE = the file must exist, read and write without emptying it
+const FS_READ = 1;
+const FS_WRITE = 2;
+const FS_APPEND = 3;
+const FS_UPDATE = 4;
+
+/// attribute bits of a directory entry
+const FS_ATTR_READONLY = 0x01;
+const FS_ATTR_HIDDEN = 0x02;
+const FS_ATTR_SYSTEM = 0x04;
+const FS_ATTR_LABEL = 0x08;
+const FS_ATTR_DIR = 0x10;
+const FS_ATTR_ARCHIVE = 0x20;
+
+/// values of fs_error
+const FS_OK = 0;
+const FS_ERR_NOT_MOUNTED = 1;
+const FS_ERR_IO = 2;
+const FS_ERR_NOT_FOUND = 3;
+const FS_ERR_EXISTS = 4;
+const FS_ERR_NOT_DIR = 5;
+const FS_ERR_IS_DIR = 6;
+const FS_ERR_FULL = 7;
+const FS_ERR_BAD_NAME = 8;
+const FS_ERR_NOT_EMPTY = 9;
+const FS_ERR_NO_HANDLE = 10;
+const FS_ERR_BAD_HANDLE = 11;
+const FS_ERR_READ_ONLY = 12;
+const FS_ERR_BAD_FS = 13;
+const FS_ERR_BUSY = 14;
+const FS_ERR_BAD_MODE = 15;
+const FS_ERR_BAD_LABEL = 16;
+const FS_ERR_NO_VOLUME = 17;
+const FS_ERR_CROSS = 18;
+const FS_ERR_BAD_SIZE = 19;
+const FS_ERR_NO_MOUNT = 20;
+/// a partition table problem: the details are in part_error
+const FS_ERR_PART = 21;
+
+const FS_MAGIC = 0x5441464D;
+const FS_VERSION = 2;
+const FS_EOC = 0xFFFF;
+const FS_EOC_MIN = 0xFFF8;
+const FS_NONE = 0xFFFFFFFF;
+/// offsets in the header (the first sector of a volume)
+const FS_H_MAGIC = 16;
+const FS_H_BPS = 20;
+const FS_H_SPC = 22;
+const FS_H_FATS = 23;
+const FS_H_RESERVED = 24;
+const FS_H_FAT_SECTORS = 26;
+const FS_H_TOTAL = 28;
+const FS_H_CLUSTERS = 32;
+const FS_H_ROOT = 34;
+const FS_H_VERSION = 36;
+/// the volume label: up to 48 characters and a zero (49 bytes)
+const FS_H_LABEL = 38;
+/// the preferred mount point: up to 12 characters and a zero (13 bytes)
+const FS_H_MOUNT = 88;
+/// offsets in a 32 byte directory entry
+const FS_E_ATTR = 11;
+const FS_E_CTIME = 14;
+const FS_E_CDATE = 16;
+const FS_E_ADATE = 18;
+const FS_E_MTIME = 22;
+const FS_E_MDATE = 24;
+const FS_E_CLUSTER = 26;
+const FS_E_SIZE = 28;
+
+/// the reason of the last failure (FS_ERR_*), 0 after a successful call
+let fs_error: u32;
+
+/// the mounted volumes
+let fs_m_used: u8[FS_MAX_MOUNTS];
+let fs_m_dev: u32[FS_MAX_MOUNTS];
+let fs_m_vol: u32[FS_MAX_MOUNTS];
+let fs_m_base: u32[FS_MAX_MOUNTS];
+let fs_m_total: u32[FS_MAX_MOUNTS];
+let fs_m_reserved: u32[FS_MAX_MOUNTS];
+let fs_m_fat_sectors: u32[FS_MAX_MOUNTS];
+let fs_m_clusters: u32[FS_MAX_MOUNTS];
+let fs_m_hint: u32[FS_MAX_MOUNTS];
+let fs_m_name83: u8[FS_MAX_MOUNTS * 11];
+let fs_m_label: u8[FS_MAX_MOUNTS * 49];
+
+/// the volume that the low level functions work on (selected by fs_select): its numbers
+let fs_slot: u32 = 0xFFFFFFFF;
+let fs_dev: u32;
+let fs_base: u32;
+let fs_total: u32;
+let fs_reserved: u32;
+let fs_fat_start: u32;
+let fs_fat_sectors: u32;
+let fs_data_start: u32;
+let fs_clusters: u32;
+let fs_free_hint: u32 = 2;
+let fs_fat_lba: u32 = 0xFFFFFFFF;
+
+/// the current directory: the volume (FS_NONE = the virtual root) and the cluster
+let fs_cwd_slot: u32 = 0xFFFFFFFF;
+let fs_cwd: u32 = 1;
+let fs_cwd_path: u8[128] = "/";
+let fs_new_path: u8[128];
+/// the volume where the last fs_walk ended (FS_NONE for the virtual root)
+let fs_w_slot: u32 = 0xFFFFFFFF;
+
+/// shared sector buffers: directory sectors, the FAT sector, file data
+let fs_sec: u8[FS_SECTOR];
+let fs_fatbuf: u8[FS_SECTOR];
+let fs_dsec: u8[FS_SECTOR];
+let fs_zero: u8[FS_SECTOR];
+
+/// the raw directory entry found last, and where it lives (loc_lba = 0: it does not live anywhere)
+let fs_ent: u8[32];
+let fs_old_ent: u8[32];
+let fs_loc_lba: u32;
+let fs_loc_idx: u32;
+let fs_parent: u32;
+
+/// the decoded entry that fs_stat() / fs_list_next() fill in
+let fs_ent_name: u8[13];
+let fs_ent_attr: u32;
+let fs_ent_size: u32;
+let fs_ent_cluster: u32;
+/// time and date of the last change, packed like FAT (fs_time_hour() ... fs_date_day() take them apart)
+let fs_ent_time: u32;
+let fs_ent_date: u32;
+let fs_ent_ctime: u32;
+let fs_ent_cdate: u32;
+
+/// path parsing
+let fs_p: u32;
+let fs_comp: u8[16];
+let fs_name83: u8[11];
+let fs_last83: u8[11];
+let fs_last_empty: u32;
+let fs_dotdot83: u8[] = raw "..         ";
+let fs_dot83: u8[] = raw ".          ";
+let fs_valid_chars: u8[] = "!#$%&'()-@^_`{}~";
+
+/// directory listing state
+let fs_it_slot: u32;
+let fs_it_c: u32;
+let fs_it_i: u32;
+
+/// open files
+let fs_h_used: u8[FS_MAX_FILES];
+let fs_h_mode: u8[FS_MAX_FILES];
+let fs_h_dirty: u8[FS_MAX_FILES];
+let fs_h_slot: u32[FS_MAX_FILES];
+let fs_h_first: u32[FS_MAX_FILES];
+let fs_h_cur: u32[FS_MAX_FILES];
+let fs_h_idx: u32[FS_MAX_FILES];
+let fs_h_pos: u32[FS_MAX_FILES];
+let fs_h_size: u32[FS_MAX_FILES];
+let fs_h_lba: u32[FS_MAX_FILES];
+let fs_h_eidx: u32[FS_MAX_FILES];
+let fs_prev: u32;
+
+/// what fs_mount_get() and fs_vol_info() report
+let fs_mi_name: u8[13];
+let fs_mi_label: u8[49];
+let fs_mi_dev: u32;
+let fs_mi_vol: u32;
+let fs_mi_clusters: u32;
+let fs_mi_free: u32;
+
+let fs_messages: u8[] = "OK\0Disk not mounted\0Disk error\0Not found\0Already exists\0Not a directory\0Is a directory\0Disk full\0Bad name\0Directory not empty\0Too many open files\0Bad file handle\0Read only\0Not a valid file system\0Busy (open file, mounted volume or current directory)\0Bad open mode\0Bad volume label (1 - 48 characters needed)\0No such volume\0Different volumes\0Bad size\0Too many mounted volumes\0Partition table problem";
+
+/// ---------------------------------------------------------------- small helpers (internal)
+
+function fs_peek8(a: u32): u32 {
+    return u32(peek(a, u8));
+}
+
+function fs_peek16(a: u32): u32 {
+    return u32(peek(a, u16));
+}
+
+function fs_peek32(a: u32): u32 {
+    return peek(a, u32);
+}
+
+/// clears fs_error
+function fs_begin(): u32 {
+    fs_error = 0;
+    return 1;
+}
+
+/// text of an error code, e.g. fs_error_text(fs_error)
+function fs_error_text(code: u32): u32 {
+    let a: u32;
+    let k: u32;
+
+    a = addr(fs_messages);
+    for (k of 0 .. math_umin(code, FS_ERR_PART)) {
+        a = a + str_len(a) + 1;
+    }
+    return a;
+}
+
+/// turns the failure of a part_* function into fs_error
+function fs_part_fail() {
+    if (part_error == PART_ERR_NO_VOLUME) {
+        fs_error = FS_ERR_NO_VOLUME;
+    } else if (part_error == PART_ERR_IO || part_error == PART_ERR_NO_DISK) {
+        fs_error = FS_ERR_IO;
+    } else {
+        fs_error = FS_ERR_PART;
+    }
+}
+
+/// ---------------------------------------------------------------- date and time
+
+/// time packed like FAT: hhhhhmmmmmmsssss (seconds in steps of 2)
+function fs_pack_time(h: u32, m: u32, s: u32): u32 {
+    return (h << 11) | (m << 5) | (s / 2);
+}
+
+/// date packed like FAT: yyyyyyymmmmddddd (years since 1980)
+function fs_pack_date(year: u32, month: u32, day: u32): u32 {
+    return ((year - 1980) << 9) | (month << 5) | day;
+}
+
+function fs_time_hour(t: u32): u32 {
+    return t >> 11;
+}
+
+function fs_time_minute(t: u32): u32 {
+    return (t >> 5) & 63;
+}
+
+function fs_time_second(t: u32): u32 {
+    return (t & 31) * 2;
+}
+
+function fs_date_year(d: u32): u32 {
+    return (d >> 9) + 1980;
+}
+
+function fs_date_month(d: u32): u32 {
+    return (d >> 5) & 15;
+}
+
+function fs_date_day(d: u32): u32 {
+    return d & 31;
+}
+
+/// the current time of the RTC, packed
+function fs_now_time(): u32 {
+    return fs_pack_time(rtc_hour(), rtc_minute(), rtc_second());
+}
+
+/// the current date of the RTC, packed (1980 is the earliest year)
+function fs_now_date(): u32 {
+    return fs_pack_date(math_umax(rtc_year(), 1980), rtc_month(), rtc_day());
+}
+
+function fs_put2(buf: u32, v: u32) {
+    poke(buf, u8, u8(48 + v / 10 % 10));
+    poke(buf + 1, u8, u8(48 + v % 10));
+}
+
+/// "YYYY-MM-DD" -> buf (11 bytes with the terminating zero)
+function fs_format_date(d: u32, buf: u32) {
+    let y: u32;
+
+    y = fs_date_year(d);
+    fs_put2(buf, y / 100);
+    fs_put2(buf + 2, y % 100);
+    poke(buf + 4, u8, 45);
+    fs_put2(buf + 5, fs_date_month(d));
+    poke(buf + 7, u8, 45);
+    fs_put2(buf + 8, fs_date_day(d));
+    poke(buf + 10, u8, 0);
+}
+
+/// "HH:MM:SS" -> buf (9 bytes with the terminating zero)
+function fs_format_time(t: u32, buf: u32) {
+    fs_put2(buf, fs_time_hour(t));
+    poke(buf + 2, u8, 58);
+    fs_put2(buf + 3, fs_time_minute(t));
+    poke(buf + 5, u8, 58);
+    fs_put2(buf + 6, fs_time_second(t));
+    poke(buf + 8, u8, 0);
+}
+
+/// ---------------------------------------------------------------- volume access (internal)
+
+/// Makes a mounted volume the one that the low level functions work on (FS_NONE = none).
+function fs_select(s: u32) {
+    if (s == fs_slot) {
+        return;
+    }
+    if (fs_slot != FS_NONE) {
+        fs_m_hint[fs_slot] = fs_free_hint;
+    }
+    fs_fat_lba = FS_NONE;
+    fs_slot = s;
+    if (s == FS_NONE) {
+        return;
+    }
+    fs_dev = fs_m_dev[s];
+    fs_base = fs_m_base[s];
+    fs_total = fs_m_total[s];
+    fs_reserved = fs_m_reserved[s];
+    fs_fat_start = fs_m_reserved[s];
+    fs_fat_sectors = fs_m_fat_sectors[s];
+    fs_data_start = fs_m_reserved[s] + fs_m_fat_sectors[s];
+    fs_clusters = fs_m_clusters[s];
+    fs_free_hint = fs_m_hint[s];
+}
+
+/// sector numbers inside the selected volume start at 0
+function fs_read_sector(lba: u32, buf: u32): u32 {
+    if (fs_slot == FS_NONE || lba >= fs_total || disk_read(fs_dev, fs_base + lba, buf, 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    return 1;
+}
+
+function fs_write_sector(lba: u32, buf: u32): u32 {
+    if (fs_slot == FS_NONE || lba >= fs_total || disk_write(fs_dev, fs_base + lba, buf, 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    return 1;
+}
+
+/// first sector of a cluster
+function fs_cluster_lba(c: u32): u32 {
+    return fs_data_start + c - 2;
+}
+
+/// 1 when c is a cluster number that can hold data
+function fs_valid_cluster(c: u32): u32 {
+    if (c >= 2 && c <= fs_clusters + 1) {
+        return 1;
+    }
+    return 0;
+}
+
+/// ---------------------------------------------------------------- the allocation table (internal)
+
+function fs_fat_load(idx: u32): u32 {
+    let lba: u32;
+
+    if (idx >= fs_fat_sectors) {
+        fs_error = FS_ERR_BAD_FS;
+        return 0;
+    }
+    lba = fs_fat_start + idx;
+    if (lba == fs_fat_lba) {
+        return 1;
+    }
+    fs_fat_lba = FS_NONE;
+    if (fs_read_sector(lba, addr(fs_fatbuf)) == 0) {
+        return 0;
+    }
+    fs_fat_lba = lba;
+    return 1;
+}
+
+/// the table entry of cluster c: the next cluster, FS_EOC for the last one, 0 for a free one
+function fs_fat_get(c: u32): u32 {
+    if (fs_valid_cluster(c) == 0) {
+        fs_error = FS_ERR_BAD_FS;
+        return FS_EOC;
+    }
+    if (fs_fat_load(c / 256) == 0) {
+        return FS_EOC;
+    }
+    return fs_peek16(addr(fs_fatbuf) + (c % 256) * 2);
+}
+
+function fs_fat_set(c: u32, v: u32): u32 {
+    if (fs_valid_cluster(c) == 0) {
+        fs_error = FS_ERR_BAD_FS;
+        return 0;
+    }
+    if (fs_fat_load(c / 256) == 0) {
+        return 0;
+    }
+    poke(addr(fs_fatbuf) + (c % 256) * 2, u16, u16(v));
+    return fs_write_sector(fs_fat_lba, addr(fs_fatbuf));
+}
+
+/// takes a free cluster, marks it as the end of a chain and returns its number (0 = disk full / error)
+function fs_alloc_cluster(): u32 {
+    let c: u32;
+    let tried: u32;
+
+    c = fs_free_hint;
+    if (fs_valid_cluster(c) == 0) {
+        c = 2;
+    }
+    for (tried of 0 .. fs_clusters) {
+        if (fs_fat_get(c) == 0 && fs_error == 0) {
+            if (fs_fat_set(c, FS_EOC) == 0) {
+                return 0;
+            }
+            fs_free_hint = c + 1;
+            return c;
+        }
+        if (fs_error != 0) {
+            return 0;
+        }
+        c++;
+        if (c > fs_clusters + 1) {
+            c = 2;
+        }
+    }
+    fs_error = FS_ERR_FULL;
+    return 0;
+}
+
+/// frees a whole chain of clusters
+function fs_free_chain(first: u32) {
+    let c: u32;
+    let n: u32;
+    let guard: u32;
+
+    c = first;
+    guard = 0;
+    while (fs_valid_cluster(c) == 1 && guard <= fs_clusters) {
+        n = fs_fat_get(c);
+        if (fs_fat_set(c, 0) == 0) {
+            return;
+        }
+        if (c < fs_free_hint) {
+            fs_free_hint = c;
+        }
+        c = n;
+        guard++;
+    }
+}
+
+/// number of free clusters of the selected volume
+function fs_count_free(): u32 {
+    let c: u32;
+    let n: u32;
+
+    n = 0;
+    for (c of 2 .. fs_clusters + 2) {
+        if (fs_fat_get(c) == 0 && fs_error == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/// ---------------------------------------------------------------- directories (internal)
+
+/// 1 when the 11 bytes at a and b are the same
+function fs_same11(a: u32, b: u32): u32 {
+    let i: u32;
+
+    for (i of 0 .. 11) {
+        if (peek(a + i, u8) != peek(b + i, u8)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/// searches a directory for the 8.3 name at name83; fills fs_ent, fs_loc_lba and fs_loc_idx.
+/// 0 = not found (fs_error stays 0) or a disk problem (fs_error is set)
+function fs_dir_find(dir: u32, name83: u32): u32 {
+    let c: u32;
+    let i: u32;
+    let e: u32;
+    let first: u32;
+    let lba: u32;
+    let guard: u32;
+
+    c = dir;
+    guard = 0;
+    while (fs_valid_cluster(c) == 1 && guard <= fs_clusters) {
+        lba = fs_cluster_lba(c);
+        if (fs_read_sector(lba, addr(fs_sec)) == 0) {
+            return 0;
+        }
+        for (i of 0 .. 16) {
+            e = addr(fs_sec) + i * 32;
+            first = fs_peek8(e);
+            if (first == 0) {
+                return 0;
+            }
+            if (first != 0xE5 && (fs_peek8(e + FS_E_ATTR) & FS_ATTR_LABEL) == 0 && fs_same11(e, name83) == 1) {
+                memcpy(addr(fs_ent), e, 32);
+                fs_loc_lba = lba;
+                fs_loc_idx = i;
+                return 1;
+            }
+        }
+        c = fs_fat_get(c);
+        if (c >= FS_EOC_MIN) {
+            return 0;
+        }
+        guard++;
+    }
+    return 0;
+}
+
+/// finds a free slot for a new entry (a deleted one, the end of the directory, or a new cluster appended
+/// to the directory) and sets fs_loc_lba / fs_loc_idx
+function fs_dir_alloc_slot(dir: u32): u32 {
+    let c: u32;
+    let n: u32;
+    let i: u32;
+    let first: u32;
+    let lba: u32;
+    let guard: u32;
+
+    c = dir;
+    guard = 0;
+    while (guard <= fs_clusters) {
+        lba = fs_cluster_lba(c);
+        if (fs_read_sector(lba, addr(fs_sec)) == 0) {
+            return 0;
+        }
+        for (i of 0 .. 16) {
+            first = fs_peek8(addr(fs_sec) + i * 32);
+            if (first == 0 || first == 0xE5) {
+                fs_loc_lba = lba;
+                fs_loc_idx = i;
+                return 1;
+            }
+        }
+        n = fs_fat_get(c);
+        if (fs_error != 0) {
+            return 0;
+        }
+        if (n >= FS_EOC_MIN) {
+            /// the directory is full: it grows by one empty cluster
+            n = fs_alloc_cluster();
+            if (n == 0) {
+                return 0;
+            }
+            if (fs_write_sector(fs_cluster_lba(n), addr(fs_zero)) == 0 || fs_fat_set(c, n) == 0) {
+                return 0;
+            }
+            fs_loc_lba = fs_cluster_lba(n);
+            fs_loc_idx = 0;
+            return 1;
+        }
+        c = n;
+        guard++;
+    }
+    fs_error = FS_ERR_BAD_FS;
+    return 0;
+}
+
+/// writes fs_ent to the place in fs_loc_lba / fs_loc_idx
+function fs_dir_put(): u32 {
+    if (fs_read_sector(fs_loc_lba, addr(fs_sec)) == 0) {
+        return 0;
+    }
+    memcpy(addr(fs_sec) + fs_loc_idx * 32, addr(fs_ent), 32);
+    return fs_write_sector(fs_loc_lba, addr(fs_sec));
+}
+
+/// marks the entry at fs_loc_lba / fs_loc_idx as deleted
+function fs_dir_delete(): u32 {
+    if (fs_read_sector(fs_loc_lba, addr(fs_sec)) == 0) {
+        return 0;
+    }
+    poke(addr(fs_sec) + fs_loc_idx * 32, u8, 0xE5);
+    return fs_write_sector(fs_loc_lba, addr(fs_sec));
+}
+
+/// builds a fresh entry in fs_ent: name, attributes, created = changed = now
+function fs_ent_build(name83: u32, attr: u32, first: u32, size: u32) {
+    let t: u32;
+    let d: u32;
+
+    t = fs_now_time();
+    d = fs_now_date();
+    memset(addr(fs_ent), 0, 32);
+    memcpy(addr(fs_ent), name83, 11);
+    poke(addr(fs_ent) + FS_E_ATTR, u8, u8(attr));
+    poke(addr(fs_ent) + FS_E_CTIME, u16, u16(t));
+    poke(addr(fs_ent) + FS_E_CDATE, u16, u16(d));
+    poke(addr(fs_ent) + FS_E_ADATE, u16, u16(d));
+    poke(addr(fs_ent) + FS_E_MTIME, u16, u16(t));
+    poke(addr(fs_ent) + FS_E_MDATE, u16, u16(d));
+    poke(addr(fs_ent) + FS_E_CLUSTER, u16, u16(first));
+    poke(addr(fs_ent) + FS_E_SIZE, u32, size);
+}
+
+/// "NAME    EXT" (11 bytes at src) -> "NAME.EXT" at dst, returns the length
+function fs_text_from83(src: u32, dst: u32): u32 {
+    let i: u32;
+    let n: u32;
+    let k: u32;
+
+    n = 0;
+    for (i of 0 .. 8) {
+        if (peek(src + i, u8) != 32) {
+            n = i + 1;
+        }
+    }
+    for (i of 0 .. n) {
+        poke(dst + i, u8, peek(src + i, u8));
+    }
+    k = 0;
+    for (i of 8 .. 11) {
+        if (peek(src + i, u8) != 32) {
+            k = i - 7;
+        }
+    }
+    if (k > 0) {
+        poke(dst + n, u8, 46);
+        n++;
+        for (i of 0 .. k) {
+            poke(dst + n + i, u8, peek(src + 8 + i, u8));
+        }
+        n = n + k;
+    }
+    poke(dst + n, u8, 0);
+    return n;
+}
+
+/// decodes fs_ent into the public fs_ent_* variables
+function fs_ent_decode() {
+    fs_text_from83(addr(fs_ent), addr(fs_ent_name));
+    fs_ent_attr = fs_peek8(addr(fs_ent) + FS_E_ATTR);
+    fs_ent_size = fs_peek32(addr(fs_ent) + FS_E_SIZE);
+    fs_ent_cluster = fs_peek16(addr(fs_ent) + FS_E_CLUSTER);
+    fs_ent_time = fs_peek16(addr(fs_ent) + FS_E_MTIME);
+    fs_ent_date = fs_peek16(addr(fs_ent) + FS_E_MDATE);
+    fs_ent_ctime = fs_peek16(addr(fs_ent) + FS_E_CTIME);
+    fs_ent_cdate = fs_peek16(addr(fs_ent) + FS_E_CDATE);
+}
+
+/// the cluster a directory entry points to; a directory stored with 0 is the root
+function fs_dir_cluster_of_ent(): u32 {
+    let c: u32;
+
+    c = fs_peek16(addr(fs_ent) + FS_E_CLUSTER);
+    if (c == 0) {
+        return FS_ROOT;
+    }
+    return c;
+}
+
+/// 1 when a directory holds nothing but "." and ".."
+function fs_dir_is_empty(dir: u32): u32 {
+    let c: u32;
+    let i: u32;
+    let e: u32;
+    let first: u32;
+    let guard: u32;
+
+    c = dir;
+    guard = 0;
+    while (fs_valid_cluster(c) == 1 && guard <= fs_clusters) {
+        if (fs_read_sector(fs_cluster_lba(c), addr(fs_sec)) == 0) {
+            return 0;
+        }
+        for (i of 0 .. 16) {
+            e = addr(fs_sec) + i * 32;
+            first = fs_peek8(e);
+            if (first == 0) {
+                return 1;
+            }
+            if (first != 0xE5 && first != 46) {
+                return 0;
+            }
+        }
+        c = fs_fat_get(c);
+        if (c >= FS_EOC_MIN) {
+            return 1;
+        }
+        guard++;
+    }
+    return 1;
+}
+
+/// ---------------------------------------------------------------- names and paths (internal)
+
+/// is c allowed in a name?
+function fs_name_char_ok(c: u32): u32 {
+    let i: u32;
+
+    if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57)) {
+        return 1;
+    }
+    for (i of 0 .. sizeof(fs_valid_chars) - 1) {
+        if (u32(fs_valid_chars[i]) == c) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// the next component of the path at fs_p -> fs_comp. 0 = end of the path, 1 = a component, 2 = too long
+function fs_comp_next(): u32 {
+    let p: u32;
+    let c: u32;
+    let n: u32;
+
+    p = fs_p;
+    c = fs_peek8(p);
+    while (c == 47) {
+        p++;
+        c = fs_peek8(p);
+    }
+    if (c == 0) {
+        fs_p = p;
+        return 0;
+    }
+    n = 0;
+    while (c != 0 && c != 47) {
+        if (n < 15) {
+            fs_comp[n] = u8(c);
+        }
+        n++;
+        p++;
+        c = fs_peek8(p);
+    }
+    fs_p = p;
+    if (n > 12) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 2;
+    }
+    fs_comp[n] = 0;
+    return 1;
+}
+
+/// 1 when only slashes are left in the path
+function fs_at_end(): u32 {
+    let p: u32;
+
+    p = fs_p;
+    while (fs_peek8(p) == 47) {
+        p++;
+    }
+    if (fs_peek8(p) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// fs_comp ("name.ext") -> fs_name83 (8 + 3 characters, blank padded, upper case); 0 = not a valid name
+function fs_make83(): u32 {
+    let k: u32;
+    let c: u32;
+    let ni: u32;
+    let ei: u32;
+    let dot: u32;
+
+    memset(addr(fs_name83), 32, 11);
+    ni = 0;
+    ei = 0;
+    dot = 0;
+    k = 0;
+    c = u32(fs_comp[0]);
+    while (c != 0) {
+        c = str_upper_c(c);
+        if (c == 46) {
+            if (dot == 1 || ni == 0) {
+                return 0;
+            }
+            dot = 1;
+        } else {
+            if (fs_name_char_ok(c) == 0) {
+                return 0;
+            }
+            if (dot == 0) {
+                if (ni >= 8) {
+                    return 0;
+                }
+                fs_name83[ni] = u8(c);
+                ni++;
+            } else {
+                if (ei >= 3) {
+                    return 0;
+                }
+                fs_name83[8 + ei] = u8(c);
+                ei++;
+            }
+        }
+        k++;
+        c = u32(fs_comp[k]);
+    }
+    if (ni == 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/// 1 for the component ".", 2 for "..", otherwise 0
+function fs_comp_dots(): u32 {
+    if (fs_comp[0] == 46 && fs_comp[1] == 0) {
+        return 1;
+    }
+    if (fs_comp[0] == 46 && fs_comp[1] == 46 && fs_comp[2] == 0) {
+        return 2;
+    }
+    return 0;
+}
+
+/// a mount point name given as a string ("DATA" or "/DATA") -> fs_name83; 0 = not a valid name
+function fs_parse_mount_name(s: u32): u32 {
+    let n: u32;
+    let c: u32;
+
+    if (fs_peek8(s) == 47) {
+        s++;
+    }
+    n = 0;
+    c = fs_peek8(s);
+    while (c != 0) {
+        if (c == 47 || n >= 12) {
+            return 0;
+        }
+        fs_comp[n] = u8(c);
+        n++;
+        c = fs_peek8(s + n);
+    }
+    fs_comp[n] = 0;
+    return fs_make83();
+}
+
+/// the mounted volume with the mount point name83, or FS_NONE
+function fs_find_mount(name83: u32): u32 {
+    let s: u32;
+
+    for (s of 0 .. FS_MAX_MOUNTS) {
+        if (fs_m_used[s] == 1 && fs_m_name83[s * 11] != 32 && fs_same11(addr(fs_m_name83) + s * 11, name83) == 1) {
+            return s;
+        }
+    }
+    return FS_NONE;
+}
+
+/// The directory that a path leads to, 0 on failure; it is FS_VROOT for the virtual root "/" and then no
+/// volume is selected. With stop_last = 1 the last component is not entered: the result is the directory
+/// that contains it and its 8.3 name is left in fs_last83 (fs_last_empty = 1 when the path ends in a
+/// directory, ".", ".." or "/" and there is no such name). fs_w_slot tells the volume that was reached.
+function fs_walk(path: u32, stop_last: u32): u32 {
+    let cur: u32;
+    let r: u32;
+    let last: u32;
+    let dots: u32;
+    let s: u32;
+
+    fs_last_empty = 0;
+    if (fs_peek8(path) == 47 || fs_cwd_slot == FS_NONE) {
+        fs_w_slot = FS_NONE;
+        cur = FS_VROOT;
+    } else {
+        fs_w_slot = fs_cwd_slot;
+        fs_select(fs_cwd_slot);
+        cur = fs_cwd;
+    }
+    fs_p = path;
+    loop {
+        r = fs_comp_next();
+        if (r == 0) {
+            break;
+        }
+        if (r == 2) {
+            return 0;
+        }
+        last = fs_at_end();
+        dots = fs_comp_dots();
+        if (dots == 0) {
+            if (fs_make83() == 0) {
+                fs_error = FS_ERR_BAD_NAME;
+                return 0;
+            }
+            if (stop_last == 1 && last == 1) {
+                memcpy(addr(fs_last83), addr(fs_name83), 11);
+                return cur;
+            }
+            if (cur == FS_VROOT) {
+                /// a name in the virtual root is a mount point
+                s = fs_find_mount(addr(fs_name83));
+                if (s == FS_NONE) {
+                    fs_error = FS_ERR_NOT_FOUND;
+                    return 0;
+                }
+                fs_select(s);
+                fs_w_slot = s;
+                cur = FS_ROOT;
+            } else {
+                if (fs_dir_find(cur, addr(fs_name83)) == 0) {
+                    if (fs_error == 0) {
+                        fs_error = FS_ERR_NOT_FOUND;
+                    }
+                    return 0;
+                }
+                if ((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_DIR) == 0) {
+                    fs_error = FS_ERR_NOT_DIR;
+                    return 0;
+                }
+                cur = fs_dir_cluster_of_ent();
+            }
+        } else if (dots == 2 && cur != FS_VROOT) {
+            if (cur == FS_ROOT) {
+                /// ".." in the root of a volume leads to the virtual root
+                cur = FS_VROOT;
+                fs_w_slot = FS_NONE;
+            } else {
+                if (fs_dir_find(cur, addr(fs_dotdot83)) == 0) {
+                    if (fs_error == 0) {
+                        fs_error = FS_ERR_BAD_FS;
+                    }
+                    return 0;
+                }
+                cur = fs_dir_cluster_of_ent();
+            }
+        }
+    }
+    fs_last_empty = 1;
+    return cur;
+}
+
+/// makes fs_ent a directory entry that does not live anywhere on a disk: name83 (or "." when 0) and a cluster
+function fs_synth_dir(name83: u32, cluster: u32) {
+    memset(addr(fs_ent), 0, 32);
+    memset(addr(fs_ent), 32, 11);
+    if (name83 == 0) {
+        fs_ent[0] = 46;
+    } else {
+        memcpy(addr(fs_ent), name83, 11);
+    }
+    fs_ent[FS_E_ATTR] = FS_ATTR_DIR;
+    poke(addr(fs_ent) + FS_E_CLUSTER, u16, u16(cluster));
+    fs_loc_lba = 0;
+    fs_loc_idx = 0;
+}
+
+/// resolves a path to an entry (fs_ent, fs_loc_*, fs_parent). The virtual root, the roots of the volumes,
+/// "." and ".." have no entry of their own: a made-up one (a directory, fs_loc_lba = 0) is returned for them.
+function fs_lookup(path: u32): u32 {
+    let parent: u32;
+    let s: u32;
+
+    parent = fs_walk(path, 1);
+    if (parent == 0) {
+        return 0;
+    }
+    fs_parent = parent;
+    if (fs_last_empty == 1) {
+        fs_synth_dir(0, parent);
+        return 1;
+    }
+    if (parent == FS_VROOT) {
+        s = fs_find_mount(addr(fs_last83));
+        if (s == FS_NONE) {
+            fs_error = FS_ERR_NOT_FOUND;
+            return 0;
+        }
+        fs_select(s);
+        fs_synth_dir(addr(fs_last83), FS_ROOT);
+        return 1;
+    }
+    if (fs_dir_find(parent, addr(fs_last83)) == 0) {
+        if (fs_error == 0) {
+            fs_error = FS_ERR_NOT_FOUND;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+/// 1 when a handle has the directory entry at lba / idx of the selected volume open
+function fs_is_open(lba: u32, idx: u32): u32 {
+    let h: u32;
+
+    for (h of 0 .. FS_MAX_FILES) {
+        if (fs_h_used[h] == 1 && fs_h_slot[h] == fs_slot && fs_h_lba[h] == lba && fs_h_eidx[h] == idx) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// ---------------------------------------------------------------- mounting
+
+/// the slot of a mounted volume, or FS_NONE
+function fs_find_volume(dev: u32, vol: u32): u32 {
+    let s: u32;
+
+    for (s of 0 .. FS_MAX_MOUNTS) {
+        if (fs_m_used[s] == 1 && fs_m_dev[s] == dev && fs_m_vol[s] == vol) {
+            return s;
+        }
+    }
+    return FS_NONE;
+}
+
+/// "D0V1" (disk 0, volume 1) into fs_name83
+function fs_auto_name(dev: u32, vol: u32) {
+    let n: u32;
+
+    fs_comp[0] = 68;
+    fs_comp[1] = u8(48 + (dev - std.BUS_DEV_DISK0) % 10);
+    fs_comp[2] = 86;
+    n = 3 + str_utoa(vol, addr(fs_comp) + 3);
+    fs_comp[n] = 0;
+    fs_make83();
+}
+
+/// Mounts the volume `vol` of the disk `dev` and returns its slot, or -1. name is the mount point (a string
+/// "DATA" or "/DATA"); FS_NONE = the automatic name D0V1, 0 or "" = the name stored in the volume, raw = 1
+/// mounts without any name (the volume does not show up in the tree; for the checking tools).
+function fs_do_mount(dev: u32, vol: u32, name: u32, raw: u32): i32 {
+    let s: u32;
+    let sl: u32;
+    let begin: u32;
+    let vsize: u32;
+    let total: u32;
+    let res: u32;
+    let clusters: u32;
+    let fats: u32;
+
+    fs_error = 0;
+    if (part_get(dev, vol) == 0) {
+        fs_part_fail();
+        return -1;
+    }
+    begin = part_begin;
+    vsize = part_size;
+    if (fs_find_volume(dev, vol) != FS_NONE) {
+        fs_error = FS_ERR_BUSY;
+        return -1;
+    }
+    sl = FS_NONE;
+    for (s of 0 .. FS_MAX_MOUNTS) {
+        if (fs_m_used[s] == 0 && sl == FS_NONE) {
+            sl = s;
+        }
+    }
+    if (sl == FS_NONE) {
+        fs_error = FS_ERR_NO_MOUNT;
+        return -1;
+    }
+    if (disk_read(dev, begin, addr(fs_sec), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return -1;
+    }
+    total = fs_peek32(addr(fs_sec) + FS_H_TOTAL);
+    if (fs_peek32(addr(fs_sec) + FS_H_MAGIC) != FS_MAGIC || fs_peek16(addr(fs_sec) + FS_H_BPS) != FS_SECTOR
+        || fs_peek8(addr(fs_sec) + FS_H_SPC) != 1 || fs_peek16(addr(fs_sec) + FS_H_VERSION) != FS_VERSION
+        || fs_peek16(addr(fs_sec) + FS_H_ROOT) != FS_ROOT) {
+        fs_error = FS_ERR_BAD_FS;
+        return -1;
+    }
+    clusters = fs_peek16(addr(fs_sec) + FS_H_CLUSTERS);
+    res = fs_peek16(addr(fs_sec) + FS_H_RESERVED);
+    fats = fs_peek16(addr(fs_sec) + FS_H_FAT_SECTORS);
+    if (res < 1 || clusters < 1 || clusters > FS_MAX_CLUSTERS || fats * 256 < clusters + 2 || res + fats + clusters > total || total > vsize) {
+        fs_error = FS_ERR_BAD_FS;
+        return -1;
+    }
+    /// the mount point
+    if (raw == 1) {
+        memset(addr(fs_name83), 32, 11);
+    } else if (name == FS_NONE) {
+        fs_auto_name(dev, vol);
+    } else if (name != 0 && fs_peek8(name) != 0) {
+        if (fs_parse_mount_name(name) == 0) {
+            fs_error = FS_ERR_BAD_NAME;
+            return -1;
+        }
+    } else if (fs_peek8(addr(fs_sec) + FS_H_MOUNT) != 0) {
+        if (fs_parse_mount_name(addr(fs_sec) + FS_H_MOUNT) == 0) {
+            fs_auto_name(dev, vol);
+        }
+    } else {
+        fs_auto_name(dev, vol);
+    }
+    if (raw == 0 && fs_find_mount(addr(fs_name83)) != FS_NONE) {
+        fs_error = FS_ERR_EXISTS;
+        return -1;
+    }
+    fs_m_used[sl] = 1;
+    fs_m_dev[sl] = dev;
+    fs_m_vol[sl] = vol;
+    fs_m_base[sl] = begin;
+    fs_m_total[sl] = total;
+    fs_m_reserved[sl] = res;
+    fs_m_fat_sectors[sl] = fats;
+    fs_m_clusters[sl] = clusters;
+    fs_m_hint[sl] = 2;
+    memcpy(addr(fs_m_name83) + sl * 11, addr(fs_name83), 11);
+    memcpy(addr(fs_m_label) + sl * 49, addr(fs_sec) + FS_H_LABEL, 49);
+    fs_m_label[sl * 49 + 48] = 0;
+    return i32(sl);
+}
+
+/// Mounts a volume. name is the mount point, "DATA" or "/DATA"; with "" the name stored in the volume is used
+/// (see fs_set_mountname), and when it has none, "D0V1". The volume has to be formatted (fs_format).
+/// Returns 1 on success.
+function fs_mount(dev: u32, vol: u32, name: u32): u32 {
+    if (fs_do_mount(dev, vol, name, 0) < 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/// mounts a volume without a name (it is not part of the tree): the slot, or -1
+function fs_mount_raw(dev: u32, vol: u32): i32 {
+    return fs_do_mount(dev, vol, 0, 1);
+}
+
+/// Mounts every volume of the disk that holds this file system, each one under its stored name (or D0V1 when
+/// that is taken or missing). Returns how many volumes were mounted.
+function fs_automount(dev: u32): u32 {
+    let i: u32;
+    let n: u32;
+
+    fs_error = 0;
+    if (part_load(dev) == 0) {
+        fs_part_fail();
+        return 0;
+    }
+    n = 0;
+    for (i of 0 .. PART_MAX) {
+        if (part_entry(i) == 1 && part_probe_magic(dev, i) == FS_MAGIC) {
+            if (fs_do_mount(dev, i, 0, 0) >= 0) {
+                n++;
+            } else if (fs_error == FS_ERR_EXISTS) {
+                if (fs_do_mount(dev, i, FS_NONE, 0) >= 0) {
+                    n++;
+                }
+            }
+        }
+    }
+    fs_error = 0;
+    return n;
+}
+
+/// closes the files of a mounted volume and forgets it
+function fs_unmount_slot(s: u32) {
+    let h: u32;
+
+    if (s >= FS_MAX_MOUNTS || fs_m_used[s] == 0) {
+        return;
+    }
+    for (h of 0 .. FS_MAX_FILES) {
+        if (fs_h_used[h] == 1 && fs_h_slot[h] == s) {
+            fs_flush(h);
+            fs_h_used[h] = 0;
+        }
+    }
+    if (fs_cwd_slot == s) {
+        fs_cwd_slot = FS_NONE;
+        fs_cwd = FS_VROOT;
+        fs_cwd_path[0] = 47;
+        fs_cwd_path[1] = 0;
+    }
+    if (fs_slot == s) {
+        fs_slot = FS_NONE;
+        fs_fat_lba = FS_NONE;
+    }
+    fs_m_used[s] = 0;
+    memset(addr(fs_m_name83) + s * 11, 32, 11);
+}
+
+/// Unmounts the volume with the mount point "DATA" or "/DATA": its open files are closed first. Returns 1.
+function fs_umount(name: u32): u32 {
+    let s: u32;
+
+    fs_error = 0;
+    if (fs_parse_mount_name(name) == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    s = fs_find_mount(addr(fs_name83));
+    if (s == FS_NONE) {
+        fs_error = FS_ERR_NOT_FOUND;
+        return 0;
+    }
+    fs_unmount_slot(s);
+    return 1;
+}
+
+/// unmounts all volumes (and closes all files)
+function fs_unmount_all() {
+    let s: u32;
+
+    for (s of 0 .. FS_MAX_MOUNTS) {
+        fs_unmount_slot(s);
+    }
+    fs_error = 0;
+}
+
+/// number of mounted volumes
+function fs_mount_count(): u32 {
+    let s: u32;
+    let n: u32;
+
+    n = 0;
+    for (s of 0 .. FS_MAX_MOUNTS) {
+        if (fs_m_used[s] == 1 && fs_m_name83[s * 11] != 32) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/// Describes the mounted volume in slot i (0 .. FS_MAX_MOUNTS - 1): 1 and fs_mi_name (the mount point),
+/// fs_mi_label, fs_mi_dev and fs_mi_vol are set, or 0 for a slot that is not used.
+function fs_mount_get(i: u32): u32 {
+    if (i >= FS_MAX_MOUNTS || fs_m_used[i] == 0 || fs_m_name83[i * 11] == 32) {
+        return 0;
+    }
+    fs_text_from83(addr(fs_m_name83) + i * 11, addr(fs_mi_name));
+    str_copy(addr(fs_mi_label), addr(fs_m_label) + i * 49);
+    fs_mi_dev = fs_m_dev[i];
+    fs_mi_vol = fs_m_vol[i];
+    return 1;
+}
+
+/// The volume that a path is in: 1 and fs_mi_name, fs_mi_label, fs_mi_dev, fs_mi_vol, fs_mi_clusters (all
+/// clusters) and fs_mi_free (free clusters) are set. The virtual root is no volume.
+function fs_vol_info(path: u32): u32 {
+    let d: u32;
+    let s: u32;
+
+    fs_error = 0;
+    d = fs_walk(path, 0);
+    if (d == 0) {
+        return 0;
+    }
+    if (d == FS_VROOT) {
+        fs_error = FS_ERR_NO_VOLUME;
+        return 0;
+    }
+    s = fs_w_slot;
+    fs_select(s);
+    fs_text_from83(addr(fs_m_name83) + s * 11, addr(fs_mi_name));
+    str_copy(addr(fs_mi_label), addr(fs_m_label) + s * 49);
+    fs_mi_dev = fs_m_dev[s];
+    fs_mi_vol = fs_m_vol[s];
+    fs_mi_clusters = fs_clusters;
+    fs_mi_free = fs_count_free();
+    if (fs_error != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/// ---------------------------------------------------------------- volumes: format, label, resize
+
+/// 1 when a label is acceptable: 1 .. 48 printable characters
+function fs_label_ok(s: u32): u32 {
+    let n: u32;
+    let c: u32;
+
+    n = 0;
+    c = fs_peek8(s);
+    while (c != 0) {
+        if (c < 32 || c > 126) {
+            return 0;
+        }
+        n++;
+        c = fs_peek8(s + n);
+    }
+    if (n < 1 || n > FS_LABEL_MAX) {
+        return 0;
+    }
+    return 1;
+}
+
+/// Formats a volume of a partitioned disk (everything on the volume is lost). `label` is the volume
+/// label, a zero terminated string of 1 .. 48 characters that has to be given; `reserved` sectors (at least
+/// 1) are kept in front of the file system for a boot sector and a kernel. The volume must not be mounted
+/// and is not mounted afterwards. Returns 1 on success.
+function fs_format_ex(dev: u32, vol: u32, label: u32, reserved: u32): u32 {
+    let begin: u32;
+    let size: u32;
+    let avail: u32;
+    let fat_sectors: u32;
+    let clusters: u32;
+    let total: u32;
+    let i: u32;
+
+    fs_error = 0;
+    if (fs_label_ok(label) == 0) {
+        fs_error = FS_ERR_BAD_LABEL;
+        return 0;
+    }
+    if (fs_find_volume(dev, vol) != FS_NONE) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    if (part_get(dev, vol) == 0) {
+        fs_part_fail();
+        return 0;
+    }
+    begin = part_begin;
+    size = part_size;
+    if (reserved < 1) {
+        reserved = 1;
+    }
+    if (size < reserved + 6) {
+        fs_error = FS_ERR_BAD_SIZE;
+        return 0;
+    }
+    avail = size - reserved;
+    /// the table needs 2 bytes per cluster: size it for the worst case, then use what is left
+    fat_sectors = (math_umin(avail, FS_MAX_CLUSTERS + 2) * 2 + 511) / 512;
+    clusters = math_umin(avail - fat_sectors, FS_MAX_CLUSTERS);
+    fat_sectors = ((clusters + 2) * 2 + 511) / 512;
+    total = reserved + fat_sectors + clusters;
+    /// the header in the first sector of the volume (the boot loader bytes 0 .. 15 stay as they were)
+    if (disk_read(dev, begin, addr(fs_sec), 1) == 0) {
+        memset(addr(fs_sec), 0, FS_SECTOR);
+    }
+    memset(addr(fs_sec) + FS_H_MAGIC, 0, 100 - FS_H_MAGIC);
+    poke(addr(fs_sec) + FS_H_MAGIC, u32, FS_MAGIC);
+    poke(addr(fs_sec) + FS_H_BPS, u16, FS_SECTOR);
+    poke(addr(fs_sec) + FS_H_SPC, u8, 1);
+    poke(addr(fs_sec) + FS_H_FATS, u8, 1);
+    poke(addr(fs_sec) + FS_H_RESERVED, u16, u16(reserved));
+    poke(addr(fs_sec) + FS_H_FAT_SECTORS, u16, u16(fat_sectors));
+    poke(addr(fs_sec) + FS_H_TOTAL, u32, total);
+    poke(addr(fs_sec) + FS_H_CLUSTERS, u16, u16(clusters));
+    poke(addr(fs_sec) + FS_H_ROOT, u16, FS_ROOT);
+    poke(addr(fs_sec) + FS_H_VERSION, u16, FS_VERSION);
+    str_copy(addr(fs_sec) + FS_H_LABEL, label);
+    if (disk_write(dev, begin, addr(fs_sec), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    /// an empty table: only the two reserved entries and the root directory's cluster are in use
+    for (i of 0 .. fat_sectors) {
+        if (disk_write(dev, begin + reserved + i, addr(fs_zero), 1) == 0) {
+            fs_error = FS_ERR_IO;
+            return 0;
+        }
+    }
+    memset(addr(fs_fatbuf), 0, FS_SECTOR);
+    poke(addr(fs_fatbuf), u16, 0xFFF8);
+    poke(addr(fs_fatbuf) + 2, u16, FS_EOC);
+    poke(addr(fs_fatbuf) + 4, u16, FS_EOC);
+    if (disk_write(dev, begin + reserved, addr(fs_fatbuf), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    /// the empty root directory
+    if (disk_write(dev, begin + reserved + fat_sectors, addr(fs_zero), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    return 1;
+}
+
+/// fs_format_ex with one reserved sector
+function fs_format(dev: u32, vol: u32, label: u32): u32 {
+    return fs_format_ex(dev, vol, label, 1);
+}
+
+/// Reads the header of the first sector of a volume that is not mounted into fs_sec: 1 when it holds a file
+/// system of this library (part_begin is the first sector of the volume then).
+function fs_read_header(dev: u32, vol: u32): u32 {
+    if (part_get(dev, vol) == 0) {
+        fs_part_fail();
+        return 0;
+    }
+    if (disk_read(dev, part_begin, addr(fs_sec), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    if (fs_peek32(addr(fs_sec) + FS_H_MAGIC) != FS_MAGIC || fs_peek16(addr(fs_sec) + FS_H_VERSION) != FS_VERSION) {
+        fs_error = FS_ERR_BAD_FS;
+        return 0;
+    }
+    return 1;
+}
+
+/// Stores the mount point that a volume prefers ("DATA", at most 8.3 characters; "" = none) in the volume
+/// itself, so that fs_mount(dev, vol, "") and fs_automount() use it. The volume must not be mounted.
+function fs_set_mountname(dev: u32, vol: u32, name: u32): u32 {
+    fs_error = 0;
+    if (fs_find_volume(dev, vol) != FS_NONE) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    if (fs_read_header(dev, vol) == 0) {
+        return 0;
+    }
+    memset(addr(fs_sec) + FS_H_MOUNT, 0, 13);
+    if (fs_peek8(name) != 0) {
+        if (fs_parse_mount_name(name) == 0) {
+            fs_error = FS_ERR_BAD_NAME;
+            return 0;
+        }
+        fs_text_from83(addr(fs_name83), addr(fs_sec) + FS_H_MOUNT);
+    }
+    if (disk_write(dev, part_begin, addr(fs_sec), 1) == 0) {
+        fs_error = FS_ERR_IO;
+        return 0;
+    }
+    return 1;
+}
+
+/// Changes the label of the volume that a path is in (1 .. 48 characters).
+function fs_set_label(path: u32, label: u32): u32 {
+    let d: u32;
+    let s: u32;
+
+    fs_error = 0;
+    if (fs_label_ok(label) == 0) {
+        fs_error = FS_ERR_BAD_LABEL;
+        return 0;
+    }
+    d = fs_walk(path, 0);
+    if (d == 0) {
+        return 0;
+    }
+    if (d == FS_VROOT) {
+        fs_error = FS_ERR_NO_VOLUME;
+        return 0;
+    }
+    s = fs_w_slot;
+    fs_select(s);
+    if (fs_read_sector(0, addr(fs_sec)) == 0) {
+        return 0;
+    }
+    memset(addr(fs_sec) + FS_H_LABEL, 0, 49);
+    str_copy(addr(fs_sec) + FS_H_LABEL, label);
+    if (fs_write_sector(0, addr(fs_sec)) == 0) {
+        return 0;
+    }
+    memcpy(addr(fs_m_label) + s * 49, addr(fs_sec) + FS_H_LABEL, 49);
+    return 1;
+}
+
+/// Deletes a volume from the partition table (wipe = 1 also clears its first sector, so no file system header
+/// survives). The volume must not be mounted. Returns 1 on success.
+function fs_volume_delete(dev: u32, vol: u32, wipe: u32): u32 {
+    fs_error = 0;
+    if (fs_find_volume(dev, vol) != FS_NONE) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    if (part_delete(dev, vol, wipe) == 0) {
+        fs_part_fail();
+        return 0;
+    }
+    return 1;
+}
+
+/// Moves the last sector of a volume (see part_resize) and takes care of the file system on it: a volume that
+/// holds this file system cannot become smaller than the file system needs (the file system itself is not
+/// resized - a bigger volume just has unused sectors at its end), a volume with a foreign file system may only
+/// grow. The volume must not be mounted. Returns 1 on success.
+function fs_volume_resize(dev: u32, vol: u32, new_end: u32): u32 {
+    let magic: u32;
+    let need: u32;
+
+    fs_error = 0;
+    if (fs_find_volume(dev, vol) != FS_NONE) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    magic = part_probe_magic(dev, vol);
+    if (part_error != 0) {
+        fs_part_fail();
+        return 0;
+    }
+    need = 0;
+    if (magic == FS_MAGIC) {
+        need = fs_peek32(addr(part_sec) + FS_H_TOTAL);
+    } else if (magic != 0) {
+        need = part_size;
+    }
+    if (new_end >= part_begin && new_end - part_begin + 1 < need) {
+        fs_error = FS_ERR_BAD_SIZE;
+        return 0;
+    }
+    if (part_resize(dev, vol, new_end) == 0) {
+        fs_part_fail();
+        return 0;
+    }
+    return 1;
+}
+
+/// the current directory as a path, "/" or "/DOCS/TEXT"
+function fs_getcwd(): u32 {
+    return addr(fs_cwd_path);
+}
+
+/// builds the path of the directory that `path` leads to into fs_new_path (from fs_cwd_path)
+function fs_path_apply(path: u32): u32 {
+    let n: u32;
+    let r: u32;
+    let k: u32;
+    let dots: u32;
+
+    if (fs_peek8(path) == 47) {
+        fs_new_path[0] = 47;
+        fs_new_path[1] = 0;
+    } else {
+        str_copy(addr(fs_new_path), addr(fs_cwd_path));
+    }
+    fs_p = path;
+    loop {
+        r = fs_comp_next();
+        if (r != 1) {
+            break;
+        }
+        dots = fs_comp_dots();
+        n = str_len(addr(fs_new_path));
+        if (dots == 2) {
+            /// remove the last component
+            while (n > 1 && fs_new_path[n - 1] != 47) {
+                n--;
+            }
+            if (n > 1) {
+                n--;
+            }
+            fs_new_path[n] = 0;
+        } else if (dots == 0) {
+            if (n + 14 >= 128) {
+                fs_error = FS_ERR_BAD_NAME;
+                return 0;
+            }
+            if (n > 1) {
+                fs_new_path[n] = 47;
+                n++;
+            }
+            k = 0;
+            while (fs_comp[k] != 0) {
+                fs_new_path[n + k] = u8(str_upper_c(u32(fs_comp[k])));
+                k++;
+            }
+            fs_new_path[n + k] = 0;
+        }
+    }
+    if (r == 2) {
+        /// a component that is too long
+        return 0;
+    }
+    return 1;
+}
+
+/// The absolute, tidy form of a path ("docs/../Note.txt" in /DATA is "/DATA/NOTE.TXT"): "." and ".." are resolved,
+/// letters are upper case. Only the text is worked out, the path does not have to exist. 0 = too long / bad name.
+function fs_abspath(path: u32): u32 {
+    fs_error = 0;
+    if (fs_path_apply(path) == 0) {
+        return 0;
+    }
+    return addr(fs_new_path);
+}
+
+/// changes the current directory
+function fs_chdir(path: u32): u32 {
+    let d: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    d = fs_walk(path, 0);
+    if (d == 0) {
+        return 0;
+    }
+    if (fs_path_apply(path) == 0) {
+        return 0;
+    }
+    fs_cwd_slot = fs_w_slot;
+    fs_cwd = d;
+    str_copy(addr(fs_cwd_path), addr(fs_new_path));
+    return 1;
+}
+
+/// creates a directory (its parent has to exist)
+function fs_mkdir(path: u32): u32 {
+    let parent: u32;
+    let c: u32;
+    let up: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    parent = fs_walk(path, 1);
+    if (parent == 0) {
+        return 0;
+    }
+    if (parent == FS_VROOT) {
+        /// the virtual root only has mount points; it cannot be changed
+        fs_error = FS_ERR_READ_ONLY;
+        if (fs_last_empty == 0 && fs_find_mount(addr(fs_last83)) != FS_NONE) {
+            fs_error = FS_ERR_EXISTS;
+        }
+        return 0;
+    }
+    if (fs_last_empty == 1) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    if (fs_dir_find(parent, addr(fs_last83)) == 1) {
+        fs_error = FS_ERR_EXISTS;
+        return 0;
+    }
+    if (fs_error != 0) {
+        return 0;
+    }
+    if (fs_dir_alloc_slot(parent) == 0) {
+        return 0;
+    }
+    c = fs_alloc_cluster();
+    if (c == 0) {
+        return 0;
+    }
+    /// the new cluster starts with "." (itself) and ".." (the parent, 0 for the root)
+    memset(addr(fs_sec), 0, FS_SECTOR);
+    up = parent;
+    if (parent == FS_ROOT) {
+        up = 0;
+    }
+    fs_ent_build(addr(fs_dot83), FS_ATTR_DIR, c, 0);
+    memcpy(addr(fs_sec), addr(fs_ent), 32);
+    fs_ent_build(addr(fs_dotdot83), FS_ATTR_DIR, up, 0);
+    memcpy(addr(fs_sec) + 32, addr(fs_ent), 32);
+    if (fs_write_sector(fs_cluster_lba(c), addr(fs_sec)) == 0) {
+        fs_free_chain(c);
+        return 0;
+    }
+    /// ... and the entry in the parent
+    fs_ent_build(addr(fs_last83), FS_ATTR_DIR, c, 0);
+    return fs_dir_put();
+}
+
+/// removes an empty directory
+function fs_rmdir(path: u32): u32 {
+    let c: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 0) {
+        return 0;
+    }
+    if (fs_loc_lba == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    if ((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_DIR) == 0) {
+        fs_error = FS_ERR_NOT_DIR;
+        return 0;
+    }
+    c = fs_dir_cluster_of_ent();
+    if ((c == fs_cwd && fs_slot == fs_cwd_slot) || c == FS_ROOT) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    if (fs_dir_is_empty(c) == 0) {
+        if (fs_error == 0) {
+            fs_error = FS_ERR_NOT_EMPTY;
+        }
+        return 0;
+    }
+    /// the emptiness check only used the sector buffer: fs_ent and fs_loc_* still describe the entry
+    if (fs_dir_delete() == 0) {
+        return 0;
+    }
+    fs_free_chain(c);
+    if (fs_error != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/// starts the listing of a directory: call fs_list_next() until it returns 0. The listing of "/" shows
+/// the mount points.
+function fs_list_begin(path: u32): u32 {
+    let d: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    d = fs_walk(path, 0);
+    if (d == 0) {
+        return 0;
+    }
+    fs_it_slot = fs_w_slot;
+    fs_it_c = d;
+    fs_it_i = 0;
+    return 1;
+}
+
+/// the next entry of the listing: 1 and fs_ent_name, fs_ent_attr, fs_ent_size, fs_ent_time, fs_ent_date ...
+/// are filled in, or 0 at the end of the directory. A listing may be interleaved with other calls.
+function fs_list_next(): u32 {
+    let e: u32;
+    let first: u32;
+    let i: u32;
+
+    if (fs_it_c == FS_VROOT) {
+        while (fs_it_i < FS_MAX_MOUNTS) {
+            i = fs_it_i;
+            fs_it_i++;
+            if (fs_m_used[i] == 1 && fs_m_name83[i * 11] != 32) {
+                fs_synth_dir(addr(fs_m_name83) + i * 11, FS_ROOT);
+                fs_ent_decode();
+                return 1;
+            }
+        }
+        return 0;
+    }
+    fs_select(fs_it_slot);
+    while (fs_valid_cluster(fs_it_c) == 1) {
+        if (fs_read_sector(fs_cluster_lba(fs_it_c), addr(fs_sec)) == 0) {
+            fs_it_c = 0;
+            return 0;
+        }
+        while (fs_it_i < 16) {
+            e = addr(fs_sec) + fs_it_i * 32;
+            first = fs_peek8(e);
+            fs_it_i++;
+            if (first == 0) {
+                fs_it_c = 0;
+                return 0;
+            }
+            if (first != 0xE5 && (fs_peek8(e + FS_E_ATTR) & FS_ATTR_LABEL) == 0) {
+                memcpy(addr(fs_ent), e, 32);
+                fs_ent_decode();
+                return 1;
+            }
+        }
+        fs_it_i = 0;
+        fs_it_c = fs_fat_get(fs_it_c);
+        if (fs_it_c >= FS_EOC_MIN) {
+            fs_it_c = 0;
+        }
+    }
+    return 0;
+}
+
+/// looks a path up and fills fs_ent_name, fs_ent_attr, fs_ent_size, fs_ent_time, fs_ent_date ...
+/// (the root directory, "." and ".." give a directory without times)
+function fs_stat(path: u32): u32 {
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 0) {
+        return 0;
+    }
+    fs_ent_decode();
+    return 1;
+}
+
+function fs_exists(path: u32): u32 {
+    return fs_stat(path);
+}
+
+/// 1 when the path is a directory
+function fs_is_dir(path: u32): u32 {
+    if (fs_stat(path) == 1 && (fs_ent_attr & FS_ATTR_DIR) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// the size of a file in bytes, or -1 when it is not found or a directory
+function fs_file_size(path: u32): i32 {
+    if (fs_stat(path) == 0 || (fs_ent_attr & FS_ATTR_DIR) != 0) {
+        return -1;
+    }
+    return i32(fs_ent_size);
+}
+
+/// ---------------------------------------------------------------- files
+
+/// 1 when h is the number of an open file
+function fs_handle_ok(h: u32): u32 {
+    if (h < FS_MAX_FILES && fs_h_used[h] == 1) {
+        return 1;
+    }
+    fs_error = FS_ERR_BAD_HANDLE;
+    return 0;
+}
+
+/// Opens a file (a path, a mode FS_READ / FS_WRITE / FS_APPEND / FS_UPDATE) and returns its handle 0 ..
+/// FS_MAX_FILES - 1, or -1 on failure. FS_WRITE and FS_APPEND create the file when it does not exist.
+function fs_open(path: u32, mode: u32): i32 {
+    let h: u32;
+    let free: u32;
+    let parent: u32;
+    let first: u32;
+    let size: u32;
+
+    if (fs_begin() == 0) {
+        return -1;
+    }
+    if (mode < FS_READ || mode > FS_UPDATE) {
+        fs_error = FS_ERR_BAD_MODE;
+        return -1;
+    }
+    free = FS_NONE;
+    for (h of 0 .. FS_MAX_FILES) {
+        if (fs_h_used[h] == 0 && free == FS_NONE) {
+            free = h;
+        }
+    }
+    if (free == FS_NONE) {
+        fs_error = FS_ERR_NO_HANDLE;
+        return -1;
+    }
+    parent = fs_walk(path, 1);
+    if (parent == 0) {
+        return -1;
+    }
+    if (parent == FS_VROOT) {
+        /// the names in "/" are mount points, directories; nothing can be created there
+        if (fs_last_empty == 1 || fs_find_mount(addr(fs_last83)) != FS_NONE) {
+            fs_error = FS_ERR_IS_DIR;
+        } else if (mode == FS_READ || mode == FS_UPDATE) {
+            fs_error = FS_ERR_NOT_FOUND;
+        } else {
+            fs_error = FS_ERR_READ_ONLY;
+        }
+        return -1;
+    }
+    if (fs_last_empty == 1) {
+        fs_error = FS_ERR_IS_DIR;
+        return -1;
+    }
+    if (fs_dir_find(parent, addr(fs_last83)) == 1) {
+        if ((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_DIR) != 0) {
+            fs_error = FS_ERR_IS_DIR;
+            return -1;
+        }
+        if (mode != FS_READ && (fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_READONLY) != 0) {
+            fs_error = FS_ERR_READ_ONLY;
+            return -1;
+        }
+        if (fs_is_open(fs_loc_lba, fs_loc_idx) == 1) {
+            fs_error = FS_ERR_BUSY;
+            return -1;
+        }
+        first = fs_peek16(addr(fs_ent) + FS_E_CLUSTER);
+        size = fs_peek32(addr(fs_ent) + FS_E_SIZE);
+        if (mode == FS_WRITE) {
+            /// emptied right away: the old clusters are free, the entry says so
+            if (first != 0) {
+                fs_free_chain(first);
+                if (fs_error != 0) {
+                    return -1;
+                }
+            }
+            first = 0;
+            size = 0;
+            poke(addr(fs_ent) + FS_E_CLUSTER, u16, 0);
+            poke(addr(fs_ent) + FS_E_SIZE, u32, 0);
+            poke(addr(fs_ent) + FS_E_MTIME, u16, u16(fs_now_time()));
+            poke(addr(fs_ent) + FS_E_MDATE, u16, u16(fs_now_date()));
+            if (fs_dir_put() == 0) {
+                return -1;
+            }
+        }
+    } else {
+        if (fs_error != 0) {
+            return -1;
+        }
+        if (mode == FS_READ || mode == FS_UPDATE) {
+            fs_error = FS_ERR_NOT_FOUND;
+            return -1;
+        }
+        if (fs_dir_alloc_slot(parent) == 0) {
+            return -1;
+        }
+        fs_ent_build(addr(fs_last83), FS_ATTR_ARCHIVE, 0, 0);
+        if (fs_dir_put() == 0) {
+            return -1;
+        }
+        first = 0;
+        size = 0;
+    }
+    fs_h_used[free] = 1;
+    fs_h_slot[free] = fs_slot;
+    fs_h_mode[free] = u8(mode);
+    fs_h_dirty[free] = 0;
+    fs_h_first[free] = first;
+    fs_h_cur[free] = 0;
+    fs_h_idx[free] = 0;
+    fs_h_pos[free] = 0;
+    fs_h_size[free] = size;
+    fs_h_lba[free] = fs_loc_lba;
+    fs_h_eidx[free] = fs_loc_idx;
+    if (mode == FS_APPEND) {
+        fs_h_pos[free] = size;
+    }
+    return i32(free);
+}
+
+/// makes fs_h_cur the cluster that holds the byte at the file position: 1 on success, 0 when the file has no
+/// cluster there yet (fs_prev is then the last cluster of the chain, 0 for an empty file)
+function fs_h_goto(h: u32): u32 {
+    let target: u32;
+    let n: u32;
+
+    target = fs_h_pos[h] / FS_SECTOR;
+    if (fs_h_first[h] == 0) {
+        fs_prev = 0;
+        return 0;
+    }
+    if (fs_h_cur[h] == 0 || fs_h_idx[h] > target) {
+        fs_h_cur[h] = fs_h_first[h];
+        fs_h_idx[h] = 0;
+    }
+    while (fs_h_idx[h] < target) {
+        n = fs_fat_get(fs_h_cur[h]);
+        if (fs_error != 0) {
+            return 0;
+        }
+        if (n >= FS_EOC_MIN || fs_valid_cluster(n) == 0) {
+            fs_prev = fs_h_cur[h];
+            return 0;
+        }
+        fs_h_cur[h] = n;
+        fs_h_idx[h]++;
+    }
+    return 1;
+}
+
+/// Reads up to len bytes at the file position into RAM; returns the number of bytes (0 = end of the file)
+/// or -1 on failure.
+function fs_read(h: u32, buf: u32, len: u32): i32 {
+    let total: u32;
+    let off: u32;
+    let n: u32;
+    let lba: u32;
+
+    if (fs_begin() == 0 || fs_handle_ok(h) == 0) {
+        return -1;
+    }
+    fs_select(fs_h_slot[h]);
+    total = 0;
+    while (len > 0 && fs_h_pos[h] < fs_h_size[h]) {
+        off = fs_h_pos[h] % FS_SECTOR;
+        n = math_umin(math_umin(len, FS_SECTOR - off), fs_h_size[h] - fs_h_pos[h]);
+        if (fs_h_goto(h) == 0) {
+            if (fs_error == 0) {
+                fs_error = FS_ERR_BAD_FS;
+            }
+            return -1;
+        }
+        lba = fs_cluster_lba(fs_h_cur[h]);
+        if (n == FS_SECTOR) {
+            if (fs_read_sector(lba, buf) == 0) {
+                return -1;
+            }
+        } else {
+            if (fs_read_sector(lba, addr(fs_dsec)) == 0) {
+                return -1;
+            }
+            memcpy(buf, addr(fs_dsec) + off, n);
+        }
+        fs_h_pos[h] = fs_h_pos[h] + n;
+        buf = buf + n;
+        len = len - n;
+        total = total + n;
+    }
+    return i32(total);
+}
+
+/// Writes len bytes at the file position (the file grows as needed); returns the number of bytes written -
+/// fewer than len when the disk is full (fs_error is FS_ERR_FULL) - or -1 on failure.
+function fs_write(h: u32, buf: u32, len: u32): i32 {
+    let total: u32;
+    let off: u32;
+    let n: u32;
+    let lba: u32;
+    let c: u32;
+    let fresh: u32;
+
+    if (fs_begin() == 0 || fs_handle_ok(h) == 0) {
+        return -1;
+    }
+    if (fs_h_mode[h] == FS_READ) {
+        fs_error = FS_ERR_READ_ONLY;
+        return -1;
+    }
+    fs_select(fs_h_slot[h]);
+    total = 0;
+    while (len > 0) {
+        off = fs_h_pos[h] % FS_SECTOR;
+        n = math_umin(len, FS_SECTOR - off);
+        fresh = 0;
+        if (fs_h_goto(h) == 0) {
+            if (fs_error != 0) {
+                break;
+            }
+            /// the file has no cluster for this position yet: append one to the chain
+            c = fs_alloc_cluster();
+            if (c == 0) {
+                break;
+            }
+            if (fs_h_first[h] == 0) {
+                fs_h_first[h] = c;
+            } else if (fs_fat_set(fs_prev, c) == 0) {
+                fs_free_chain(c);
+                break;
+            }
+            fs_h_cur[h] = c;
+            fs_h_idx[h] = fs_h_pos[h] / FS_SECTOR;
+            fresh = 1;
+        }
+        lba = fs_cluster_lba(fs_h_cur[h]);
+        if (n == FS_SECTOR) {
+            if (fs_write_sector(lba, buf) == 0) {
+                break;
+            }
+        } else {
+            if (fresh == 1) {
+                memset(addr(fs_dsec), 0, FS_SECTOR);
+            } else if (fs_read_sector(lba, addr(fs_dsec)) == 0) {
+                break;
+            }
+            memcpy(addr(fs_dsec) + off, buf, n);
+            if (fs_write_sector(lba, addr(fs_dsec)) == 0) {
+                break;
+            }
+        }
+        fs_h_pos[h] = fs_h_pos[h] + n;
+        if (fs_h_pos[h] > fs_h_size[h]) {
+            fs_h_size[h] = fs_h_pos[h];
+        }
+        fs_h_dirty[h] = 1;
+        buf = buf + n;
+        len = len - n;
+        total = total + n;
+    }
+    if (len > 0 && total == 0) {
+        return -1;
+    }
+    return i32(total);
+}
+
+/// stores the size, the first cluster and the time of the change of an open file in its directory entry
+function fs_flush(h: u32): u32 {
+    let e: u32;
+
+    if (fs_begin() == 0 || fs_handle_ok(h) == 0) {
+        return 0;
+    }
+    if (fs_h_dirty[h] == 0) {
+        return 1;
+    }
+    fs_select(fs_h_slot[h]);
+    if (fs_read_sector(fs_h_lba[h], addr(fs_sec)) == 0) {
+        return 0;
+    }
+    e = addr(fs_sec) + fs_h_eidx[h] * 32;
+    poke(e + FS_E_CLUSTER, u16, u16(fs_h_first[h]));
+    poke(e + FS_E_SIZE, u32, fs_h_size[h]);
+    poke(e + FS_E_MTIME, u16, u16(fs_now_time()));
+    poke(e + FS_E_MDATE, u16, u16(fs_now_date()));
+    poke(e + FS_E_ADATE, u16, u16(fs_now_date()));
+    poke(e + FS_E_ATTR, u8, u8(fs_peek8(e + FS_E_ATTR) | FS_ATTR_ARCHIVE));
+    if (fs_write_sector(fs_h_lba[h], addr(fs_sec)) == 0) {
+        return 0;
+    }
+    fs_h_dirty[h] = 0;
+    return 1;
+}
+
+/// closes a file; a changed file gets its size and its time of the change stored first
+function fs_close(h: u32): u32 {
+    let ok: u32;
+
+    ok = fs_flush(h);
+    if (h < FS_MAX_FILES) {
+        fs_h_used[h] = 0;
+    }
+    return ok;
+}
+
+/// moves the file position (to at most the end of the file); returns the new position
+function fs_seek(h: u32, pos: u32): u32 {
+    if (fs_begin() == 0 || fs_handle_ok(h) == 0) {
+        return 0;
+    }
+    fs_h_pos[h] = math_umin(pos, fs_h_size[h]);
+    return fs_h_pos[h];
+}
+
+function fs_tell(h: u32): u32 {
+    if (h < FS_MAX_FILES) {
+        return fs_h_pos[h];
+    }
+    return 0;
+}
+
+/// the current size of an open file
+function fs_size(h: u32): u32 {
+    if (h < FS_MAX_FILES) {
+        return fs_h_size[h];
+    }
+    return 0;
+}
+
+/// 1 when the position is at the end of the file
+function fs_eof(h: u32): u32 {
+    if (h < FS_MAX_FILES && fs_h_pos[h] >= fs_h_size[h]) {
+        return 1;
+    }
+    return 0;
+}
+
+/// reads a whole file (at most max bytes) into RAM; returns the number of bytes or -1
+function fs_read_file(path: u32, buf: u32, max: u32): i32 {
+    let h: i32;
+    let n: i32;
+
+    h = fs_open(path, FS_READ);
+    if (h < 0) {
+        return -1;
+    }
+    n = fs_read(u32(h), buf, max);
+    fs_close(u32(h));
+    return n;
+}
+
+/// creates or replaces a file with len bytes from RAM; returns 1 when all of them were written
+function fs_write_file(path: u32, buf: u32, len: u32): u32 {
+    let h: i32;
+    let n: i32;
+
+    h = fs_open(path, FS_WRITE);
+    if (h < 0) {
+        return 0;
+    }
+    n = fs_write(u32(h), buf, len);
+    if (fs_close(u32(h)) == 0 || n != i32(len)) {
+        return 0;
+    }
+    return 1;
+}
+
+/// deletes a file (not a directory)
+function fs_remove(path: u32): u32 {
+    let first: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 0) {
+        return 0;
+    }
+    if (fs_loc_lba == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    if ((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_DIR) != 0) {
+        fs_error = FS_ERR_IS_DIR;
+        return 0;
+    }
+    if ((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_READONLY) != 0) {
+        fs_error = FS_ERR_READ_ONLY;
+        return 0;
+    }
+    if (fs_is_open(fs_loc_lba, fs_loc_idx) == 1) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    /// the entry is deleted first, then its clusters are released (the entry in fs_ent stays valid)
+    first = fs_peek16(addr(fs_ent) + FS_E_CLUSTER);
+    if (fs_dir_delete() == 0) {
+        return 0;
+    }
+    fs_free_chain(first);
+    if (fs_error != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+/// Renames or moves a file or a directory (the new name must not exist). A directory moved to another
+/// parent gets its ".." entry corrected; it cannot be moved into itself.
+function fs_rename(old_path: u32, new_path: u32): u32 {
+    let old_lba: u32;
+    let old_idx: u32;
+    let old_attr: u32;
+    let old_first: u32;
+    let parent2: u32;
+    let cur: u32;
+    let guard: u32;
+    let up: u32;
+    let old_slot: u32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(old_path) == 0) {
+        return 0;
+    }
+    if (fs_loc_lba == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    if (fs_is_open(fs_loc_lba, fs_loc_idx) == 1) {
+        fs_error = FS_ERR_BUSY;
+        return 0;
+    }
+    memcpy(addr(fs_old_ent), addr(fs_ent), 32);
+    old_slot = fs_slot;
+    old_lba = fs_loc_lba;
+    old_idx = fs_loc_idx;
+    old_attr = fs_peek8(addr(fs_old_ent) + FS_E_ATTR);
+    old_first = fs_peek16(addr(fs_old_ent) + FS_E_CLUSTER);
+    parent2 = fs_walk(new_path, 1);
+    if (parent2 == 0) {
+        return 0;
+    }
+    if (parent2 == FS_VROOT) {
+        fs_error = FS_ERR_READ_ONLY;
+        return 0;
+    }
+    if (fs_slot != old_slot) {
+        fs_error = FS_ERR_CROSS;
+        return 0;
+    }
+    if (fs_last_empty == 1) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    if (fs_dir_find(parent2, addr(fs_last83)) == 1) {
+        fs_error = FS_ERR_EXISTS;
+        return 0;
+    }
+    if (fs_error != 0) {
+        return 0;
+    }
+    if ((old_attr & FS_ATTR_DIR) != 0) {
+        /// walk from the new parent up to the root: the directory must not be on that way
+        cur = parent2;
+        guard = 0;
+        while (cur != FS_ROOT && guard <= fs_clusters) {
+            if (cur == old_first) {
+                fs_error = FS_ERR_BAD_NAME;
+                return 0;
+            }
+            if (fs_dir_find(cur, addr(fs_dotdot83)) == 0) {
+                if (fs_error == 0) {
+                    fs_error = FS_ERR_BAD_FS;
+                }
+                return 0;
+            }
+            cur = fs_dir_cluster_of_ent();
+            guard++;
+        }
+    }
+    if (fs_dir_alloc_slot(parent2) == 0) {
+        return 0;
+    }
+    memcpy(addr(fs_ent), addr(fs_old_ent), 32);
+    memcpy(addr(fs_ent), addr(fs_last83), 11);
+    if (fs_dir_put() == 0) {
+        return 0;
+    }
+    fs_loc_lba = old_lba;
+    fs_loc_idx = old_idx;
+    if (fs_dir_delete() == 0) {
+        return 0;
+    }
+    if ((old_attr & FS_ATTR_DIR) != 0) {
+        /// ".." is the second entry of the directory's first cluster
+        if (fs_read_sector(fs_cluster_lba(old_first), addr(fs_sec)) == 0) {
+            return 0;
+        }
+        up = parent2;
+        if (parent2 == FS_ROOT) {
+            up = 0;
+        }
+        poke(addr(fs_sec) + 32 + FS_E_CLUSTER, u16, u16(up));
+        if (fs_write_sector(fs_cluster_lba(old_first), addr(fs_sec)) == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/// sets the time and the date of the last change of a file or directory (packed, see fs_pack_time)
+function fs_set_time(path: u32, time: u32, date: u32): u32 {
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 0) {
+        return 0;
+    }
+    if (fs_loc_lba == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    poke(addr(fs_ent) + FS_E_MTIME, u16, u16(time));
+    poke(addr(fs_ent) + FS_E_MDATE, u16, u16(date));
+    return fs_dir_put();
+}
+
+/// like the touch command: sets the time of the last change to now, or creates an empty file
+function fs_touch(path: u32): u32 {
+    let h: i32;
+
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 1) {
+        if (fs_loc_lba == 0) {
+            fs_error = FS_ERR_BAD_NAME;
+            return 0;
+        }
+        return fs_set_time(path, fs_now_time(), fs_now_date());
+    }
+    if (fs_error != FS_ERR_NOT_FOUND) {
+        return 0;
+    }
+    fs_error = 0;
+    h = fs_open(path, FS_WRITE);
+    if (h < 0) {
+        return 0;
+    }
+    return fs_close(u32(h));
+}
+
+/// Sets the attributes (FS_ATTR_READONLY | FS_ATTR_HIDDEN | FS_ATTR_SYSTEM | FS_ATTR_ARCHIVE) of a file or
+/// directory; the directory bit cannot be changed.
+function fs_set_attr(path: u32, attr: u32): u32 {
+    if (fs_begin() == 0) {
+        return 0;
+    }
+    if (fs_lookup(path) == 0) {
+        return 0;
+    }
+    if (fs_loc_lba == 0) {
+        fs_error = FS_ERR_BAD_NAME;
+        return 0;
+    }
+    poke(addr(fs_ent) + FS_E_ATTR, u8, u8((fs_peek8(addr(fs_ent) + FS_E_ATTR) & FS_ATTR_DIR) | (attr & 0x27)));
+    return fs_dir_put();
+}

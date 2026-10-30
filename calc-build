@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# ./calc-build [--ext-data]   compiles the calculator: the module calc/calc_engine.meteor first, then calc/calc.meteor
+set -e
+cd "$(dirname "$0")"
+python3 meteor/frontend.py calc/calc_engine.meteor -o calc/calc_engine.json --module
+python3 meteor/bsontool.py json2bson calc/calc_engine.json -o calc/calc_engine.obj
+python3 meteor/frontend.py calc/calc.meteor -o calc/calc.json
+python3 meteor/bsontool.py json2bson calc/calc.json -o calc/calc.obj
+python3 meteor/backend.py calc/calc.obj -o calc/calc.quartz "$@"
+python3 qasm/qasm.py calc/calc.quartz calc/calc.bin

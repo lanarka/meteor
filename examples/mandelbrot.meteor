@@ -1,0 +1,52 @@
+program "Mandelbrot set in f32, rows sent to the screen with a bulk transfer (lib/gfx, lib/colors)";
+import "../lib/gfx.obj";
+import "../lib/sys.obj";
+
+const W = 160;
+const H = 120;
+const MAXIT = 24;
+const X0 = -2.2;
+const Y0 = -1.2;
+const DX = 3.3 / W;
+const DY = 2.4 / H;
+
+let cr: f32;
+let ci: f32;
+let zr: f32;
+let zi: f32;
+let t: f32;
+let px: u32;
+let py: u32;
+let it: u32;
+let i: u32;
+let row: u32[W];
+let pal: u32[16];
+
+/// palette: blue grows, green falls
+for (i of 0 .. 16) {
+    pal[i] = color_rgb(i * 8, 255 - i * 16, i * 16);
+}
+ci = Y0;
+for (py of 0 .. H) {
+    cr = X0;
+    for (px of 0 .. W) {
+        zr = 0.0;
+        zi = 0.0;
+        it = 0;
+        while (it < MAXIT && zr * zr + zi * zi < 4.0) {
+            t = zr * zr - zi * zi + cr;
+            zi = 2.0 * zr * zi + ci;
+            zr = t;
+            it++;
+        }
+        if (it == MAXIT) {
+            row[px] = COLOR_BLACK;
+        } else {
+            row[px] = pal[it & 15];
+        }
+        cr += DX;
+    }
+    gfx_blit(0, py, W, 1, addr(row));
+    ci += DY;
+}
+sys_idle();

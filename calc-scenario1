@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# the calculator with the wallpaper stored by plain store instructions inside the program
+./build-modules && ./calc-build &&
+quartz calc/calc.bin --ram 8388608

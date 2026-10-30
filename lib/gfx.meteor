@@ -1,0 +1,448 @@
+module gfx;
+import "colors.obj";
+import "sys.obj";
+import "math.obj";
+include "../inc/std.quartz";
+
+/// Pixel graphics. Colours are 0xAABBGGRR. Everything that draws clips to the screen, so shapes
+/// may be partly (or completely) outside. gfx_w / gfx_h hold the size of the screen in pixels.
+/// Rectangles are sent to the video device one row at a time with a block transfer (much faster
+/// than plotting pixels). Translucent colours (alpha < 255) are blended with what is already
+/// on the screen by every function that uses block transfers: fill_rect, hline, sprites.
+///
+/// RAM: about 8 KB (the pixel row that gfx_fill_rect reuses).
+
+const GFX_ROW_MAX = 2048;
+
+let gfx_w: i32;
+let gfx_h: i32;
+/// identical pixels reused by gfx_fill_rect (valid for the first gfx_row_n pixels); because every pixel is the
+/// same, the buffer serves any rectangle of up to GFX_ROW_MAX pixels, several rows per block transfer
+let gfx_row: u32[GFX_ROW_MAX];
+let gfx_row_color: u32;
+let gfx_row_n: u32;
+
+/// read the size of the screen again (after a video mode change)
+function gfx_init() {
+    gfx_w = i32(in(std.BUS_DEV_VIDEO, std.VIDEO_PORT_WIDTH));
+    gfx_h = i32(in(std.BUS_DEV_VIDEO, std.VIDEO_PORT_HEIGHT));
+    gfx_row_n = 0;
+}
+
+/// switch the video mode: 1 = 640x480, 2 = 1024x768, 3 = 1280x960
+function gfx_set_mode(mode: u32) {
+    sys_video(mode);
+    gfx_init();
+}
+
+/// writes a value to a port of the video device (low level)
+function gfx_out(port: u32, value: u32) {
+    out(std.BUS_DEV_VIDEO, port, value);
+}
+
+/// fills the screen with a colour; gfx_clear(COLOR_TRANSPARENT) keeps the text layer visible
+function gfx_clear(color: u32) {
+    gfx_out(std.VIDEO_CMD_CLEARC, color);
+}
+
+/// waits for the next frame (the same as sys_vsync)
+function gfx_vsync() {
+    out(std.BUS_DEV_VIDEO, std.VIDEO_CMD_VSYNC, 0);
+}
+
+/// one pixel, clipped
+function gfx_pixel(x: i32, y: i32, color: u32) {
+    if (x >= 0 && y >= 0 && x < gfx_w && y < gfx_h) {
+        out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_X, u32(x));
+        out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_Y, u32(y));
+        out(std.BUS_DEV_VIDEO, std.VIDEO_CMD_PIX, color);
+    }
+}
+
+/// one pixel without any clipping (the caller guarantees it is on the screen) - the fastest way
+function gfx_plot(x: u32, y: u32, color: u32) {
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_X, x);
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_Y, y);
+    out(std.BUS_DEV_VIDEO, std.VIDEO_CMD_PIX, color);
+}
+
+/// make sure the first n pixels of gfx_row have the colour (doubling with memcpy: about log2(n) steps)
+function gfx_row_fill(n: u32, color: u32) {
+    let cnt: u32;
+
+    if (color != gfx_row_color) {
+        gfx_row_color = color;
+        gfx_row_n = 0;
+    }
+    if (gfx_row_n == 0) {
+        gfx_row[0] = color;
+        gfx_row_n = 1;
+    }
+    while (gfx_row_n < n) {
+        cnt = math_umin(gfx_row_n, n - gfx_row_n);
+        memcpy(addr(gfx_row) + gfx_row_n * 4, addr(gfx_row), cnt * 4);
+        gfx_row_n = gfx_row_n + cnt;
+    }
+}
+
+/// vertical line of h pixels
+function gfx_vline(x: i32, y: i32, h: i32, color: u32) {
+    gfx_fill_rect(x, y, 1, h, color);
+}
+
+/// filled rectangle, clipped, as few block transfers as possible (several rows each)
+function gfx_fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32) {
+    let x1: i32;
+    let y1: i32;
+    let cx: i32;
+    let cw: u32;
+    let per: u32;
+    let need: u32;
+    let rows: u32;
+    let row: i32;
+
+    x1 = x + w;
+    y1 = y + h;
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+    if (x1 > gfx_w) {
+        x1 = gfx_w;
+    }
+    if (y1 > gfx_h) {
+        y1 = gfx_h;
+    }
+    if (x >= x1 || y >= y1) {
+        return;
+    }
+    cx = x;
+    while (cx < x1) {
+        /// a stripe cw pixels wide; `per` of its rows fit into the buffer
+        cw = u32(x1 - cx);
+        if (cw > GFX_ROW_MAX) {
+            cw = GFX_ROW_MAX;
+        }
+        per = GFX_ROW_MAX / cw;
+        if (per > u32(y1 - y)) {
+            per = u32(y1 - y);
+        }
+        need = cw * per;
+        gfx_row_fill(need, color);
+        out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_X, u32(cx));
+        out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_W, cw);
+        row = y;
+        while (row < y1) {
+            rows = per;
+            if (rows > u32(y1 - row)) {
+                rows = u32(y1 - row);
+            }
+            out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_Y, u32(row));
+            out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_H, rows);
+            outb(std.BUS_DEV_VIDEO, std.VIDEO_CMD_FRAME, addr(gfx_row), cw * rows * 4);
+            row = row + i32(rows);
+        }
+        cx = cx + i32(cw);
+    }
+}
+
+/// horizontal line: the single row special case of gfx_fill_rect (much less bookkeeping)
+function gfx_hline(x: i32, y: i32, w: i32, color: u32) {
+    if (y < 0 || y >= gfx_h) {
+        return;
+    }
+    if (x < 0) {
+        w = w + x;
+        x = 0;
+    }
+    if (x + w > gfx_w) {
+        w = gfx_w - x;
+    }
+    if (w <= 0) {
+        return;
+    }
+    gfx_row_fill(u32(w), color);
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_X, u32(x));
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_Y, u32(y));
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_W, u32(w));
+    out(std.BUS_DEV_VIDEO, std.VIDEO_PORT_H, 1);
+    outb(std.BUS_DEV_VIDEO, std.VIDEO_CMD_FRAME, addr(gfx_row), u32(w) * 4);
+}
+
+/// 1 pixel outline of a rectangle
+function gfx_rect(x: i32, y: i32, w: i32, h: i32, color: u32) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    gfx_hline(x, y, w, color);
+    gfx_hline(x, y + h - 1, w, color);
+    gfx_vline(x, y, h, color);
+    gfx_vline(x + w - 1, y, h, color);
+}
+
+/// vertical gradient from the colour `top` to the colour `bottom` (one row at a time: exact, but slow)
+function gfx_gradient_v(x: i32, y: i32, w: i32, h: i32, top: u32, bottom: u32) {
+    let j: i32;
+
+    for (j of 0 .. h) {
+        gfx_fill_rect(x, y + j, w, 1, color_mix(top, bottom, u32(j * 255 / math_max(h - 1, 1))));
+    }
+}
+
+/// vertical gradient made of `bands` flat strips: much cheaper than gfx_gradient_v when it is
+/// redrawn in every frame (48 strips of a 480 pixel high screen look smooth)
+function gfx_gradient_bands(x: i32, y: i32, w: i32, h: i32, top: u32, bottom: u32, bands: i32) {
+    let j: i32;
+
+    for (j of 0 .. bands) {
+        gfx_fill_rect(x, y + j * h / bands, w, (j + 1) * h / bands - j * h / bands,
+                      color_mix(top, bottom, u32(j * 255 / math_max(bands - 1, 1))));
+    }
+}
+
+/// horizontal gradient from the colour `left` to the colour `right`
+function gfx_gradient_h(x: i32, y: i32, w: i32, h: i32, left: u32, right: u32) {
+    let i: i32;
+
+    for (i of 0 .. w) {
+        gfx_fill_rect(x + i, y, 1, h, color_mix(left, right, u32(i * 255 / math_max(w - 1, 1))));
+    }
+}
+
+/// Bresenham line
+function gfx_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
+    let dx: i32;
+    let dy: i32;
+    let sx: i32;
+    let sy: i32;
+    let err: i32;
+    let e2: i32;
+
+    if (y0 == y1) {
+        gfx_hline(math_min(x0, x1), y0, math_abs(x1 - x0) + 1, color);
+        return;
+    }
+    dx = x1 - x0;
+    sx = 1;
+    if (dx < 0) {
+        dx = -dx;
+        sx = -1;
+    }
+    dy = y1 - y0;
+    sy = 1;
+    if (dy < 0) {
+        dy = -dy;
+        sy = -1;
+    }
+    dy = -dy;
+    err = dx + dy;
+    loop {
+        gfx_pixel(x0, y0, color);
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+        e2 = 2 * err;
+        if (e2 >= dy) {
+            err = err + dy;
+            x0 = x0 + sx;
+        }
+        if (e2 <= dx) {
+            err = err + dx;
+            y0 = y0 + sy;
+        }
+    }
+}
+
+/// triangle outline
+function gfx_triangle(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32, color: u32) {
+    gfx_line(x0, y0, x1, y1, color);
+    gfx_line(x1, y1, x2, y2, color);
+    gfx_line(x2, y2, x0, y0, color);
+}
+
+/// filled triangle (scan line by scan line)
+function gfx_fill_triangle(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32, color: u32) {
+    let t: i32;
+    let y: i32;
+    let total: i32;
+    let seg: i32;
+    let ax: i32;
+    let bx: i32;
+    let second: u32;
+
+    /// sort the vertices by y: y0 <= y1 <= y2
+    if (y0 > y1) {
+        t = y0; y0 = y1; y1 = t;
+        t = x0; x0 = x1; x1 = t;
+    }
+    if (y1 > y2) {
+        t = y1; y1 = y2; y2 = t;
+        t = x1; x1 = x2; x2 = t;
+    }
+    if (y0 > y1) {
+        t = y0; y0 = y1; y1 = t;
+        t = x0; x0 = x1; x1 = t;
+    }
+    total = y2 - y0;
+    if (total == 0) {
+        gfx_hline(math_min(x0, math_min(x1, x2)), y0,
+                  math_max(x0, math_max(x1, x2)) - math_min(x0, math_min(x1, x2)) + 1, color);
+        return;
+    }
+    for (y of y0 .. y2 + 1) {
+        second = 0;
+        if (y > y1 || y1 == y0) {
+            second = 1;
+        }
+        ax = x0 + (x2 - x0) * (y - y0) / total;
+        if (second == 0) {
+            seg = y1 - y0;
+            bx = x0 + (x1 - x0) * (y - y0) / seg;
+        } else {
+            seg = y2 - y1;
+            bx = x1;
+            if (seg != 0) {
+                bx = x1 + (x2 - x1) * (y - y1) / seg;
+            }
+        }
+        if (ax > bx) {
+            t = ax;
+            ax = bx;
+            bx = t;
+        }
+        gfx_hline(ax, y, bx - ax + 1, color);
+    }
+}
+
+/// circle outline (midpoint algorithm)
+function gfx_circle(cx: i32, cy: i32, r: i32, color: u32) {
+    let x: i32;
+    let y: i32;
+    let d: i32;
+
+    x = r;
+    y = 0;
+    d = 1 - r;
+    while (x >= y) {
+        gfx_pixel(cx + x, cy + y, color);
+        gfx_pixel(cx + y, cy + x, color);
+        gfx_pixel(cx - y, cy + x, color);
+        gfx_pixel(cx - x, cy + y, color);
+        gfx_pixel(cx - x, cy - y, color);
+        gfx_pixel(cx - y, cy - x, color);
+        gfx_pixel(cx + y, cy - x, color);
+        gfx_pixel(cx + x, cy - y, color);
+        y++;
+        if (d < 0) {
+            d = d + 2 * y + 1;
+        } else {
+            x--;
+            d = d + 2 * (y - x) + 1;
+        }
+    }
+}
+
+/// filled circle: the midpoint algorithm, every row of the disc is drawn exactly once
+function gfx_fill_circle(cx: i32, cy: i32, r: i32, color: u32) {
+    let x: i32;
+    let y: i32;
+    let d: i32;
+    let yy: i32;
+
+    if (r < 0) {
+        return;
+    }
+    x = r;
+    y = 0;
+    d = 1 - r;
+    while (x >= y) {
+        /// rows cy +- y, half width x (the flat top and bottom octants)
+        gfx_hline(cx - x, cy + y, 2 * x + 1, color);
+        if (y != 0) {
+            gfx_hline(cx - x, cy - y, 2 * x + 1, color);
+        }
+        yy = y;
+        y++;
+        if (d < 0) {
+            d = d + 2 * y + 1;
+        } else {
+            /// x is about to shrink: the rows cy +- x are complete, their half width is yy
+            if (x > yy) {
+                gfx_hline(cx - yy, cy + x, 2 * yy + 1, color);
+                gfx_hline(cx - yy, cy - x, 2 * yy + 1, color);
+            }
+            x--;
+            d = d + 2 * (y - x) + 1;
+        }
+    }
+}
+
+/// Raw block transfer of w x h RGBA pixels from RAM, no clipping on the left / top
+/// (the right / bottom edge is clipped by the device).
+function gfx_blit(x: u32, y: u32, w: u32, h: u32, addr: u32) {
+    gfx_out(std.VIDEO_PORT_X, x);
+    gfx_out(std.VIDEO_PORT_Y, y);
+    gfx_out(std.VIDEO_PORT_W, w);
+    gfx_out(std.VIDEO_PORT_H, h);
+    outb(std.BUS_DEV_VIDEO, std.VIDEO_CMD_FRAME, addr, w * h * 4);
+}
+
+/// w x h RGBA image from RAM at any position (also partly outside the screen), alpha blended
+function gfx_sprite(x: i32, y: i32, w: i32, h: i32, img: u32) {
+    let j: i32;
+    let sx: i32;
+    let n: i32;
+
+    if (x >= 0 && y >= 0) {
+        gfx_blit(u32(x), u32(y), u32(w), u32(h), img);
+        return;
+    }
+    /// clipped on the left or on the top: row by row
+    sx = 0;
+    if (x < 0) {
+        sx = -x;
+    }
+    n = w - sx;
+    if (x + w > gfx_w) {
+        n = gfx_w - x - sx;
+    }
+    if (n <= 0) {
+        return;
+    }
+    for (j of 0 .. h) {
+        if (y + j >= 0 && y + j < gfx_h) {
+            gfx_blit(u32(x + sx), u32(y + j), u32(n), 1, img + u32((j * w + sx) * 4));
+        }
+    }
+}
+
+/// ---------------------------------------------------------------- off-screen RGBA buffers
+/// A buffer is a u32 array of w * h pixels in RAM; it is drawn with gfx_sprite / gfx_blit.
+
+/// fills a w x h buffer with one colour
+function gfx_buf_fill(buf: u32, w: u32, h: u32, color: u32) {
+    let n: u32;
+    let done: u32;
+    let cnt: u32;
+
+    n = w * h;
+    if (n == 0) {
+        return;
+    }
+    poke(buf, u32, color);
+    done = 1;
+    while (done < n) {
+        cnt = math_umin(done, n - done);
+        memcpy(buf + done * 4, buf, cnt * 4);
+        done = done + cnt;
+    }
+}
+
+/// sets one pixel of a buffer that is `stride` pixels wide
+function gfx_buf_set(buf: u32, stride: u32, x: u32, y: u32, color: u32) {
+    poke(buf + (y * stride + x) * 4, u32, color);
+}
+
+gfx_init();

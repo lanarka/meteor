@@ -1,0 +1,167 @@
+program "calc - 'Quartz - The Computer': a tiny desktop with a wallpaper, a top bar (About / quit) and a draggable, slightly transparent calculator window. Mouse only. The arithmetic lives in the module calc_engine, the user interface is built from lib/gfx (rectangles, wallpaper blit), lib/gtext (the built-in VGA font), lib/cursor and lib/input (mouse)";
+import "../lib/gtext.obj";
+import "../lib/cursor.obj";
+import "../lib/input.obj";
+import "calc_engine.obj";
+/// the wallpaper (1.2 MB) is the only big piece of data
+ram(start: 0x2000, size: 4194304);
+
+const BAR_BLUE = 0xFF800000;
+const WIN_W = 300;
+const WIN_H = 220;
+
+let wallpaper: u32[] = file("assets/wallpaper.raw");
+let str_title: u8[] = "Quartz - The Computer";
+let str_about: u8[] = "Quartz OS 1.0";
+let str_ok: u8[] = "OK";
+let str_calctitle: u8[] = "Calculator";
+let btn_chars: u8[] = raw "789/456*123-0C=+";
+let display_buf: u8[16];
+let about_open: u32;
+let drag_active: u32;
+let drag_off_x: i32;
+let drag_off_y: i32;
+let calc_win_x: i32;
+let calc_win_y: i32;
+
+/// a 18 x 18 grey box with a one-letter label (close / about buttons)
+function small_button(x: i32, y: i32, letter: u32, border: u32) {
+    gfx_fill_rect(x, y, 18, 18, COLOR_LIGHT_GRAY);
+    gfx_rect(x, y, 18, 18, border);
+    gtext_char(x + 5, y + 1, letter, COLOR_BLACK, 0);
+}
+
+function draw_topbar() {
+    gfx_fill_rect(0, 0, 640, 24, BAR_BLUE);
+    gtext(8, 4, addr(str_title), COLOR_WHITE);
+    small_button(618, 3, 88, COLOR_GRAY);
+    small_button(596, 3, 63, COLOR_GRAY);
+}
+
+function draw_about() {
+    gfx_fill_rect(190, 185, 260, 110, COLOR_LIGHT_GRAY);
+    gfx_rect(190, 185, 260, 110, COLOR_GRAY);
+    gtext_center(190, 260, 214, addr(str_about), COLOR_BLACK);
+    gfx_fill_rect(280, 256, 80, 24, COLOR_LIGHT_GRAY);
+    gfx_rect(280, 256, 80, 24, COLOR_GRAY);
+    gtext_center(280, 80, 260, addr(str_ok), COLOR_BLACK);
+}
+
+function draw_calc_window() {
+    let i: u32;
+    let ax: i32;
+    let ay: i32;
+
+    /// title bar and body are slightly transparent (alpha 0xE0) and follow calc_win_x / calc_win_y
+    gfx_fill_rect(calc_win_x, calc_win_y, WIN_W, 26, color_alpha(BAR_BLUE, 0xE0));
+    gfx_fill_rect(calc_win_x, calc_win_y + 26, WIN_W, 194, color_alpha(COLOR_WHITE, 0xE0));
+    gfx_rect(calc_win_x, calc_win_y, WIN_W, WIN_H, COLOR_DARK_GRAY);
+    small_button(calc_win_x + 278, calc_win_y + 4, 88, COLOR_DARK_GRAY);
+    gtext(calc_win_x + 8, calc_win_y + 5, addr(str_calctitle), COLOR_WHITE);
+    /// display: the number right aligned (284 px wide box)
+    gfx_fill_rect(calc_win_x + 8, calc_win_y + 30, 284, 28, COLOR_WHITE);
+    gfx_rect(calc_win_x + 8, calc_win_y + 30, 284, 28, COLOR_GRAY);
+    calc_text(addr(display_buf));
+    gtext_right(calc_win_x + 276, calc_win_y + 36, addr(display_buf), COLOR_BLACK);
+    /// 4x4 key grid: key i at relative (8 + col*71, 64 + row*38), 65x32
+    for (i of 0 .. 16) {
+        ax = calc_win_x + i32(i % 4) * 71 + 8;
+        ay = calc_win_y + i32(i / 4) * 38 + 64;
+        gfx_fill_rect(ax, ay, 65, 32, COLOR_LIGHT_GRAY);
+        gfx_rect(ax, ay, 65, 32, COLOR_GRAY);
+        gtext_char(ax + 28, ay + 8, u32(btn_chars[i]), COLOR_BLACK, 0);
+    }
+}
+
+function handle_click_about() {
+    /// while the About box is open only its OK button reacts
+    if (mouse_clicked() == 1 && mouse_in(280, 256, 81, 25) == 1) {
+        about_open = 0;
+    }
+}
+
+function update_drag() {
+    /// while dragging, the window follows the mouse (never to negative coordinates)
+    if (drag_active != 1) {
+        return;
+    }
+    if (mouse_down(1) == 0) {
+        drag_active = 0;
+        return;
+    }
+    calc_win_x = math_max(mouse_x - drag_off_x, 0);
+    calc_win_y = math_max(mouse_y - drag_off_y, 0);
+}
+
+function handle_click_calc_window() {
+    let relx: i32;
+    let rely: i32;
+    let col: i32;
+    let row: i32;
+
+    if (mouse_clicked() == 0) {
+        return;
+    }
+    /// top bar close box -> halt
+    if (mouse_in(618, 3, 19, 19) == 1) {
+        halt;
+    }
+    /// top bar ? box -> About
+    if (mouse_in(596, 3, 19, 19) == 1) {
+        about_open = 1;
+        return;
+    }
+    /// outside the whole window?
+    if (mouse_in(calc_win_x, calc_win_y, WIN_W + 1, WIN_H + 1) == 0) {
+        return;
+    }
+    /// the window's own close box -> halt, it is the only window
+    if (mouse_in(calc_win_x + 278, calc_win_y + 4, 19, 19) == 1) {
+        halt;
+    }
+    relx = mouse_x - calc_win_x;
+    rely = mouse_y - calc_win_y;
+    /// title bar strip (relative y < 26): start dragging
+    if (rely < 26) {
+        drag_off_x = relx;
+        drag_off_y = rely;
+        drag_active = 1;
+        return;
+    }
+    /// key grid starts at relative (8, 64); every key is 65x32 with a 6 px gap (period 71 x 38)
+    if (relx < 8 || rely < 64) {
+        return;
+    }
+    col = (relx - 8) / 71;
+    row = (rely - 64) / 38;
+    if ((relx - 8) % 71 >= 65 || col > 3 || (rely - 64) % 38 >= 32 || row > 3) {
+        return;
+    }
+    calc_press(u32(btn_chars[row * 4 + col]));
+}
+
+/// the mouse reports pixel coordinates for the whole run
+mouse_mode(0);
+/// centre the calculator window on the 640x480 screen
+calc_win_x = 170;
+calc_win_y = 130;
+calc_reset();
+loop {
+    /// background: the wallpaper is re-blitted every frame
+    gfx_blit(0, 0, 640, 480, addr(wallpaper));
+    draw_topbar();
+    draw_calc_window();
+    if (about_open == 1) {
+        draw_about();
+    }
+    mouse_poll();
+    cursor_draw(mouse_x, mouse_y, COLOR_RED);
+    gfx_vsync();
+    /// input is handled after the frame has been shown
+    if (about_open == 1) {
+        handle_click_about();
+    } else {
+        handle_click_calc_window();
+        update_drag();
+    }
+}

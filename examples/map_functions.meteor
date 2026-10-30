@@ -1,0 +1,56 @@
+program "Map, functions with parameters, float, do-while, switch (calls lib/math for gcd and the square root)";
+import "../lib/math.obj";
+
+const LEN = 12;
+
+let values: u8[LEN] = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 3];
+let count: map<u8, u32>[16];
+let k: u8;
+let i: u32;
+let x: f32 = 1.0;
+
+/// a function of our own next to the library ones: params, a return type and a switch
+function classify(n: u32): i32 {
+    switch (n) {
+        case 0: {
+            return 100;
+        }
+        case 1: {
+            return 101;
+        }
+        default: {
+            return 199;
+        }
+    }
+}
+
+/// count value frequencies of the array in a map
+for (i of 0 .. len(values)) {
+    k = values[i];
+    count[k] = count[k] + 1;
+}
+for (i of 1 .. 10) {
+    if (has(count, u8(i))) {
+        debug(i);
+        debug(count[u8(i)]);
+    }
+}
+delete count[5];
+if (has(count, 5)) {
+    debug(-1);
+} else {
+    debug(-2);
+}
+debug(get(count, 5, 77));
+debug(math_gcd(84, 36));
+debug(math_gcd(48, 18) + math_gcd(100, 75));
+debug(math_sqrtf(2.0));
+/// do-while: 1, 2, 4, ... while x < 100
+i = 0;
+do {
+    x = x * 2.0;
+    i++;
+} while (x < 100.0);
+debug(i);
+debug(classify(1));
+debug(classify(42));

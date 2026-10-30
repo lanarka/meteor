@@ -1,0 +1,34 @@
+program "Graphics: bars, gradient, rectangles, lines and circles (lib/gfx)";
+import "../lib/gfx.obj";
+import "../lib/sys.obj";
+
+const BG = 0xFF301810;
+
+let i: i32;
+let palette: u32[] = [
+    COLOR_RED, COLOR_ORANGE, COLOR_YELLOW, COLOR_GREEN, COLOR_CYAN, COLOR_BLUE, COLOR_MAGENTA,
+    COLOR_WHITE
+];
+let star_x: i32[] = [500, 470, 400, 330, 300, 330, 400, 470];
+let star_y: i32[] = [230, 300, 330, 300, 230, 160, 130, 160];
+
+video(mode: 1, fps: 60, scale: 1.0, cursor: 0);
+gfx_clear(BG);
+/// rainbow bars
+for (i of 0 .. len(palette)) {
+    gfx_fill_rect(20 + i * 60, 20, 50, 80, palette[i]);
+}
+/// green gradient: 256 columns from black to full green
+gfx_gradient_h(20, 120, 256, 40, COLOR_BLACK, COLOR_GREEN);
+/// outline + filled rectangle
+gfx_rect(20, 180, 200, 100, COLOR_WHITE);
+gfx_fill_rect(30, 190, 180, 80, COLOR_GRAY);
+/// star of lines around (400, 230)
+for (i of 0 .. len(star_x)) {
+    gfx_line(400, 230, star_x[i], star_y[i], COLOR_YELLOW);
+}
+/// circles (partly outside of the screen on purpose: gfx_pixel clips)
+gfx_circle(520, 400, 60, COLOR_CYAN);
+gfx_circle(520, 400, 40, COLOR_MAGENTA);
+gfx_circle(630, 20, 50, COLOR_RED);
+sys_idle();

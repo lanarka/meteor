@@ -1,0 +1,110 @@
+program "sysinfo - what machine am I running on? RAM size, screen and text grid, which devices are attached (green = present), disk sizes, the clock and the uptime. Refreshes every second, Esc quits. (lib/tui, lib/sys, lib/rtc, lib/disk, lib/gfx, lib/input)";
+import "../lib/tui.obj";
+import "../lib/gfx.obj";
+import "../lib/rtc.obj";
+import "../lib/disk.obj";
+import "../lib/input.obj";
+import "../lib/str.obj";
+
+const LABEL_FG = 0xFFC0C0C0;
+const WIN_BG = 0xFF600000;
+
+let names: u8[] = "Video\0Text video\0Keyboard\0Mouse\0Audio\0RTC\0Disk 0\0Disk 1\0Network";
+let devs: u8[9] = [
+    std.BUS_DEV_VIDEO, std.BUS_DEV_VIDEO_TEXT, std.BUS_DEV_KEYBOARD, std.BUS_DEV_MOUSE, std.BUS_DEV_AUDIO,
+    std.BUS_DEV_RTC, std.BUS_DEV_DISK0, std.BUS_DEV_DISK1, std.BUS_DEV_NETWORK
+];
+let s_title: u8[] = " System information ";
+let s_ram: u8[] = "RAM:";
+let s_kb: u8[] = " KiB";
+let s_screen: u8[] = "Screen:";
+let s_text: u8[] = "Text grid:";
+let s_by: u8[] = " x ";
+let s_devices: u8[] = "Devices:";
+let s_yes: u8[] = "present";
+let s_no: u8[] = "-";
+let s_sectors: u8[] = " sectors";
+let s_time: u8[] = "Date:";
+let s_uptime: u8[] = "Running:";
+let s_ms: u8[] = " s";
+let s_esc: u8[] = "Esc = quit";
+let start_ms: u32;
+let i: u32;
+let p: u32;
+let dev: u32;
+
+/// the address of the i-th zero separated name
+function name_of(n: u32): u32 {
+    let k: u32;
+    let a: u32;
+
+    a = addr(names);
+    for (k of 0 .. n) {
+        a = a + str_len(a) + 1;
+    }
+    return a;
+}
+
+function draw() {
+    let row: u32;
+
+    tui_clear(COLOR_GRAY, COLOR_DARK_BLUE);
+    tui_window(10, 2, 60, 24, addr(s_title), COLOR_WHITE, WIN_BG, COLOR_YELLOW);
+    tui_str(13, 4, addr(s_ram), LABEL_FG, WIN_BG);
+    tui_int(24, 4, i32(sys_ram_size() / 1024), 8, COLOR_WHITE, WIN_BG);
+    tui_str(33, 4, addr(s_kb), LABEL_FG, WIN_BG);
+    tui_str(13, 5, addr(s_screen), LABEL_FG, WIN_BG);
+    tui_int(24, 5, gfx_w, 8, COLOR_WHITE, WIN_BG);
+    tui_str(33, 5, addr(s_by), LABEL_FG, WIN_BG);
+    tui_int(36, 5, gfx_h, 3, COLOR_WHITE, WIN_BG);
+    tui_str(13, 6, addr(s_text), LABEL_FG, WIN_BG);
+    tui_int(24, 6, i32(text_cols), 8, COLOR_WHITE, WIN_BG);
+    tui_str(33, 6, addr(s_by), LABEL_FG, WIN_BG);
+    tui_int(36, 6, i32(text_rows), 3, COLOR_WHITE, WIN_BG);
+    tui_str(13, 8, addr(s_devices), COLOR_YELLOW, WIN_BG);
+    for (i of 0 .. 9) {
+        row = 9 + i;
+        dev = u32(devs[i]);
+        tui_str(15, row, name_of(i), LABEL_FG, WIN_BG);
+        if (sys_dev_ready(dev) != 0) {
+            tui_str(28, row, addr(s_yes), COLOR_GREEN, WIN_BG);
+            /// disks also tell their size
+            if (dev == std.BUS_DEV_DISK0 || dev == std.BUS_DEV_DISK1) {
+                tui_int(38, row, i32(disk_sectors(dev)), 8, COLOR_WHITE, WIN_BG);
+                tui_str(46, row, addr(s_sectors), LABEL_FG, WIN_BG);
+            }
+        } else {
+            tui_str(28, row, addr(s_no), COLOR_GRAY, WIN_BG);
+        }
+    }
+    tui_str(13, 19, addr(s_time), LABEL_FG, WIN_BG);
+    tui_int(24, 19, i32(rtc_year()), 4, COLOR_WHITE, WIN_BG);
+    text_put(28, 19, 45, COLOR_WHITE, WIN_BG);
+    tui_int(29, 19, i32(rtc_month()), 2, COLOR_WHITE, WIN_BG);
+    text_put(31, 19, 45, COLOR_WHITE, WIN_BG);
+    tui_int(32, 19, i32(rtc_day()), 2, COLOR_WHITE, WIN_BG);
+    tui_str(36, 19, rtc_day_name(rtc_weekday()), COLOR_WHITE, WIN_BG);
+    tui_int(41, 19, i32(rtc_hour()), 2, COLOR_WHITE, WIN_BG);
+    text_put(43, 19, 58, COLOR_WHITE, WIN_BG);
+    tui_int(44, 19, i32(rtc_minute()), 2, COLOR_WHITE, WIN_BG);
+    text_put(46, 19, 58, COLOR_WHITE, WIN_BG);
+    tui_int(47, 19, i32(rtc_second()), 2, COLOR_WHITE, WIN_BG);
+    tui_str(13, 20, addr(s_uptime), LABEL_FG, WIN_BG);
+    tui_int(24, 20, i32((sys_millis() - start_ms) / 1000), 8, COLOR_WHITE, WIN_BG);
+    tui_str(33, 20, addr(s_ms), LABEL_FG, WIN_BG);
+    tui_str_center(10, 60, 24, addr(s_esc), COLOR_GRAY, WIN_BG);
+}
+
+text_cursor(0);
+start_ms = sys_millis();
+loop {
+    kbd_poll();
+    if (kbd_down(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    /// redraw when the second changes
+    if (rtc_second_changed() == 1) {
+        draw();
+    }
+    sys_vsync();
+}

@@ -1,0 +1,60 @@
+program "hello - a 20x20 square bouncing off the screen edges; any key or mouse button gives it a new random colour (port of hello.quartz, uses lib/gfx + lib/input)";
+import "../lib/gfx.obj";
+import "../lib/input.obj";
+
+const BOX = 20;
+const SPEED = 4;
+
+let x: i32 = 100;
+let y: i32 = 80;
+let dirx: i32 = 0;
+let diry: i32 = 0;
+let color: u32 = 0xFFFFFF00;
+let prev: u32 = 0;
+
+/// the mouse reports pixel coordinates (mode 0); only the buttons matter here
+mouse_mode(0);
+loop {
+    gfx_clear(COLOR_TRANSPARENT);
+    gfx_fill_rect(x, y, BOX, BOX, color);
+    gfx_vsync();
+    /// input: any key OR mouse button -> edge-triggered colour change
+    kbd_poll();
+    mouse_poll();
+    if (kbd_any() == 1 || mouse_btn != 0) {
+        if (prev == 0) {
+            color = rnd(0x00FFFFFF) + 0xFF000000;
+        }
+        prev = 1;
+    } else {
+        prev = 0;
+    }
+    /// X movement
+    if (dirx == 0) {
+        x = x + SPEED;
+        if (x >= gfx_w - BOX) {
+            x = gfx_w - BOX;
+            dirx = 1;
+        }
+    } else {
+        x = x - SPEED;
+        if (x <= 0) {
+            x = 0;
+            dirx = 0;
+        }
+    }
+    /// Y movement
+    if (diry == 0) {
+        y = y + SPEED;
+        if (y >= gfx_h - BOX) {
+            y = gfx_h - BOX;
+            diry = 1;
+        }
+    } else {
+        y = y - SPEED;
+        if (y <= 0) {
+            y = 0;
+            diry = 0;
+        }
+    }
+}

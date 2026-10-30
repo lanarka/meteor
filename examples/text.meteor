@@ -1,0 +1,13 @@
+program "text - endless random text: a random glyph (0..747) with random foreground and background colour at a random cell of the text grid, one per frame (port of text.quartz, uses lib/text + lib/math)";
+import "../lib/text.obj";
+import "../lib/math.obj";
+import "../lib/sys.obj";
+
+loop {
+    /// opaque random colours: full alpha + a random 24-bit value
+    text_put(
+        math_rand_below(text_cols), math_rand_below(text_rows), math_rand_below(748),
+        rnd(0x00FFFFFF) + 0xFF000000, rnd(0x00FFFFFF) + 0xFF000000
+    );
+    sys_vsync();
+}

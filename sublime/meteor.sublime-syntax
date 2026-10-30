@@ -1,0 +1,140 @@
+%YAML 1.2
+---
+# Syntax highlighting for the Meteor language (.meteor)
+# Install: copy to Sublime's  Packages/User/  folder (Preferences > Browse Packages...)
+name: Meteor
+file_extensions:
+  - meteor
+scope: source.meteor
+
+variables:
+  ident: '[A-Za-z_][A-Za-z0-9_]*'
+  types: 'i8|i16|i32|i64|u8|u16|u32|u64|f32|f64'
+  builtins: 'ram|fill|file|get|has|len|sizeof|addr|peek|rnd|sys|in|inb|outb|bus_status|out|poke|memset|memcpy|bus_reset|video|debug|wait|bell|seed|clear'
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: declarations
+    - include: keywords
+    - include: numbers
+    - include: constants
+    - include: calls
+    - include: operators
+
+  comments:
+    # /// text  is a comment *statement* (it ends up in the AST)
+    - match: '///.*$'
+      scope: comment.line.documentation.meteor
+    - match: '//.*$'
+      scope: comment.line.double-slash.meteor
+    - match: '/\*'
+      scope: punctuation.definition.comment.begin.meteor
+      push:
+        - meta_scope: comment.block.meteor
+        - match: '\*/'
+          scope: punctuation.definition.comment.end.meteor
+          pop: true
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.meteor
+      push:
+        - meta_scope: string.quoted.double.meteor
+        - match: '"'
+          scope: punctuation.definition.string.end.meteor
+          pop: true
+        - match: '\\(?:[nrt0\\"'']|x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4})'
+          scope: constant.character.escape.meteor
+        - match: '\\.'
+          scope: invalid.illegal.escape.meteor
+        - match: '$'
+          scope: invalid.illegal.unclosed-string.meteor
+          pop: true
+    - match: "'(?:\\\\[nrt0\\\\']|[^'\\\\\\n])'"
+      scope: string.quoted.single.meteor constant.character.meteor
+
+  declarations:
+    - match: '\b(function)\b\s+({{ident}})'
+      captures:
+        1: storage.type.function.meteor
+        2: entity.name.function.meteor
+    - match: '\b(let)\b\s+({{ident}})'
+      captures:
+        1: storage.type.meteor
+        2: variable.other.declaration.meteor
+    - match: '\b(const)\b\s+({{ident}})'
+      captures:
+        1: storage.type.meteor
+        2: entity.name.constant.meteor
+    - match: '\b(label|goto)\b\s+({{ident}})'
+      captures:
+        1: keyword.control.flow.meteor
+        2: entity.name.label.meteor
+    - match: '\b(?:{{types}})\b'
+      scope: storage.type.meteor
+    - match: '\b(map|raw|at)\b'
+      scope: storage.modifier.meteor
+
+  keywords:
+    - match: '\b(program|module|runtime|import|include|const_type|bounds_check)\b'
+      scope: keyword.control.import.meteor
+    - match: '\b(if|else|while|do|for|of|step|loop|switch|case|default|break|continue|return|halt)\b'
+      scope: keyword.control.meteor
+    - match: '\b(asm|delete)\b'
+      scope: keyword.other.meteor
+
+  numbers:
+    - match: '\b0[xX][0-9a-fA-F]+\b'
+      scope: constant.numeric.integer.hexadecimal.meteor
+    - match: '\b0[bB][01]+\b'
+      scope: constant.numeric.integer.binary.meteor
+    - match: '\b\d+\.\d+(?:[eE][+-]?\d+)?\b|\b\d+[eE][+-]?\d+\b'
+      scope: constant.numeric.float.meteor
+    - match: '\b\d+\b'
+      scope: constant.numeric.integer.decimal.meteor
+
+  constants:
+    - match: '\b(true|false)\b'
+      scope: constant.language.boolean.meteor
+    # std.BUS_DEV_VIDEO, kb.KEY_LEFT
+    - match: '\b({{ident}})(\.)({{ident}})\b'
+      captures:
+        1: entity.name.namespace.meteor
+        2: punctuation.accessor.dot.meteor
+        3: constant.other.meteor
+    # CONSTANT_NAMES
+    - match: '\b[A-Z][A-Z0-9_]*\b'
+      scope: constant.other.meteor
+
+  calls:
+    - match: '\b(?:{{builtins}})\b(?=\s*\()'
+      scope: support.function.builtin.meteor
+    - match: '\b{{ident}}(?=\s*\()'
+      scope: variable.function.meteor
+    # video(mode: 1, fps: 60)  /  ram(start: 0x0100, size: 4096)
+    - match: '\b({{ident}})\s*(:)(?!:)(?=\s*[^\s{])'
+      captures:
+        1: variable.parameter.meteor
+        2: punctuation.separator.meteor
+
+  operators:
+    - match: '\.\.'
+      scope: keyword.operator.range.meteor
+    - match: '\+\+|--'
+      scope: keyword.operator.increment-decrement.meteor
+    - match: '\+=|-=|='
+      scope: keyword.operator.assignment.meteor
+    - match: '==|!=|<=|>=|<|>'
+      scope: keyword.operator.comparison.meteor
+    - match: '&&|\|\||!'
+      scope: keyword.operator.logical.meteor
+    - match: '<<|>>|&|\||\^|~'
+      scope: keyword.operator.bitwise.meteor
+    - match: '[-+*/%]'
+      scope: keyword.operator.arithmetic.meteor
+    - match: ';'
+      scope: punctuation.terminator.statement.meteor
+    - match: ','
+      scope: punctuation.separator.comma.meteor

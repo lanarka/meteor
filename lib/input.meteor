@@ -1,0 +1,425 @@
+module input;
+include "../inc/std.quartz";
+include "../inc/kb.quartz";
+
+/// Keyboard and mouse.
+///
+///   kbd_poll();                       // once per frame, before asking anything
+///   if (kbd_down(kb.KEY_LEFT) == 1)   // held right now
+///   if (kbd_pressed(kb.KEY_SPACE) == 1)   // went down in this frame (edge)
+///   c = kbd_char();                   // typed ASCII character with SHIFT / CAPS LOCK and key repeat
+///
+/// The numeric keypad types its digits and signs like the main keyboard. Keys held together with Ctrl or Alt
+/// are not characters (kbd_char() gives 0; kbd_event / kbd_down still report them, so Ctrl+S can be a hotkey,
+/// see kbd_ctrl and kbd_alt). The shortcuts of the VM itself - Ctrl+Alt+PgUp / PgDn (zoom), P (pause),
+/// R (reboot), S (frame rate) - never reach the program: while Ctrl and Alt are held together (kbd_system = 1)
+/// the keyboard looks empty, and a key that was pressed in such a chord stays hidden until it is let go.
+///
+///   mouse_mode(0);                    // 0 = pixel coordinates, 1 = text cell coordinates
+///   mouse_poll();                     // once per frame; then use mouse_x / mouse_y / mouse_btn
+///   if (mouse_clicked() == 1) ...     // left button went down in this frame
+
+const KBD_REPEAT_DELAY = 30;
+const KBD_REPEAT_RATE = 4;
+
+/// the (up to 4) key codes held in the last poll, and in the poll before
+let kbd_keys: u16[4];
+let kbd_prev: u16[4];
+let kbd_count: u32;
+/// 1 while a SHIFT key is held, CAPS LOCK is a toggle
+let kbd_shift: u32;
+let kbd_caps: u32;
+/// key code produced by the last poll: a fresh press or a typematic repeat, 0 = nothing
+let kbd_event: u32;
+let kbd_caps_prev: u32;
+/// 1 while a Ctrl / an Alt key is held (also during a chord that is hidden, so a program can tell)
+let kbd_ctrl: u32;
+let kbd_alt: u32;
+/// 1 while Ctrl and Alt are held together: the VM's own shortcuts, the program sees no keys
+let kbd_system: u32;
+/// keys that were pressed in a Ctrl+Alt chord and are still held: hidden until they are released
+let kbd_masked: u16[4];
+let kbd_tmp: u16[4];
+let kbd_primary: u32;
+let kbd_last_primary: u32;
+let kbd_timer: u32;
+let kbd_shifted_digits: u8[] = ")!@#$%^&*(";
+
+/// reads the keyboard; call it once per frame before kbd_down() / kbd_pressed() / kbd_char()
+/// 1 for Shift, Control, Alt, Super and Menu keys
+function kbd_is_modifier(k: u32): u32 {
+    if (k >= kb.KEY_LEFT_SHIFT && k <= kb.KEY_KB_MENU) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 when the key is one that was pressed in a Ctrl+Alt chord and is still held
+function kbd_is_masked(k: u32): u32 {
+    let i: u32;
+
+    for (i of 0 .. 4) {
+        if (u32(kbd_masked[i]) == k) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+function kbd_mask(k: u32) {
+    let i: u32;
+
+    if (kbd_is_masked(k) == 1) {
+        return;
+    }
+    for (i of 0 .. 4) {
+        if (kbd_masked[i] == 0) {
+            kbd_masked[i] = u16(k);
+            return;
+        }
+    }
+}
+
+function kbd_poll() {
+    let i: u32;
+    let n: u32;
+    let k: u32;
+    let held: u32;
+    let caps_now: u32;
+
+    memcpy(addr(kbd_prev), addr(kbd_keys), sizeof(kbd_keys));
+    kbd_count = u32(inb(std.BUS_DEV_KEYBOARD, std.KBD_PORT_POLL, addr(kbd_keys), sizeof(kbd_keys)));
+    /// Ctrl and Alt, and the host's shortcut chord (Ctrl+Alt+...)
+    kbd_ctrl = 0;
+    kbd_alt = 0;
+    for (i of 0 .. 4) {
+        k = u32(kbd_keys[i]);
+        if (k == kb.KEY_LEFT_CONTROL || k == kb.KEY_RIGHT_CONTROL) {
+            kbd_ctrl = 1;
+        } else if (k == kb.KEY_LEFT_ALT || k == kb.KEY_RIGHT_ALT) {
+            kbd_alt = 1;
+        }
+    }
+    kbd_system = kbd_ctrl & kbd_alt;
+    /// a hidden key that is no longer held is forgotten
+    for (n of 0 .. 4) {
+        k = u32(kbd_masked[n]);
+        if (k != 0) {
+            held = 0;
+            for (i of 0 .. 4) {
+                if (u32(kbd_keys[i]) == k) {
+                    held = 1;
+                }
+            }
+            if (held == 0) {
+                kbd_masked[n] = 0;
+            }
+        }
+    }
+    if (kbd_system == 1) {
+        for (i of 0 .. 4) {
+            k = u32(kbd_keys[i]);
+            if (k != 0 && kbd_is_modifier(k) == 0) {
+                kbd_mask(k);
+            }
+        }
+    }
+    /// what the program gets: nothing during a chord, otherwise the keys without the hidden ones
+    memset(addr(kbd_tmp), 0, sizeof(kbd_tmp));
+    n = 0;
+    if (kbd_system == 0) {
+        for (i of 0 .. 4) {
+            k = u32(kbd_keys[i]);
+            if (k != 0 && kbd_is_masked(k) == 0) {
+                kbd_tmp[n] = u16(k);
+                n++;
+            }
+        }
+    }
+    memcpy(addr(kbd_keys), addr(kbd_tmp), sizeof(kbd_keys));
+    kbd_count = n;
+    /// CAPS LOCK arrives as a one frame pulse: every rising edge toggles it
+    caps_now = 0;
+    kbd_shift = 0;
+    kbd_primary = 0;
+    for (i of 0 .. 4) {
+        k = u32(kbd_keys[i]);
+        if (k == kb.KEY_CAPS_LOCK) {
+            caps_now = 1;
+        } else if (k == kb.KEY_LEFT_SHIFT || k == kb.KEY_RIGHT_SHIFT) {
+            kbd_shift = 1;
+        } else if (k != 0 && kbd_is_modifier(k) == 0 && k != kb.KEY_NUM_LOCK && k != kb.KEY_SCROLL_LOCK) {
+            if (kbd_primary == 0) {
+                kbd_primary = k;
+            }
+        }
+    }
+    if (caps_now != kbd_caps_prev) {
+        kbd_caps_prev = caps_now;
+        if (caps_now == 1) {
+            kbd_caps = kbd_caps ^ 1;
+        }
+    }
+    /// typematic: the first key fires at once, then after a delay it repeats
+    kbd_event = 0;
+    if (kbd_primary == 0) {
+        kbd_last_primary = 0;
+    } else if (kbd_primary != kbd_last_primary) {
+        kbd_last_primary = kbd_primary;
+        kbd_timer = KBD_REPEAT_DELAY;
+        kbd_event = kbd_primary;
+    } else {
+        kbd_timer--;
+        if (kbd_timer == 0) {
+            kbd_timer = KBD_REPEAT_RATE;
+            kbd_event = kbd_primary;
+        }
+    }
+}
+
+/// 1 when the key is held in the last poll
+function kbd_down(code: u32): u32 {
+    let i: u32;
+
+    for (i of 0 .. 4) {
+        if (u32(kbd_keys[i]) == code) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// 1 when the key was held in the poll before the last one
+function kbd_was_down(code: u32): u32 {
+    let i: u32;
+
+    for (i of 0 .. 4) {
+        if (u32(kbd_prev[i]) == code) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// 1 only in the frame in which the key went down
+function kbd_pressed(code: u32): u32 {
+    if (kbd_down(code) == 1 && kbd_was_down(code) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 only in the frame in which the key was let go
+function kbd_released(code: u32): u32 {
+    if (kbd_down(code) == 0 && kbd_was_down(code) == 1) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 when at least one key is held
+function kbd_any(): u32 {
+    if (kbd_count > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// physical key code -> ASCII for a US keyboard (0 = no character). Enter = 10, Backspace = 8,
+/// Tab = 9, Escape = 27, Delete = 127.
+function kbd_ascii(k: u32, shift: u32, caps: u32): u32 {
+    if (k >= 65 && k <= 90) {
+        if ((shift ^ caps) == 1) {
+            return k;
+        }
+        return k + 32;
+    }
+    if (k >= 48 && k <= 57) {
+        if (shift == 1) {
+            return u32(kbd_shifted_digits[k - 48]);
+        }
+        return k;
+    }
+    if (k >= kb.KEY_KP_0 && k <= kb.KEY_KP_9) {
+        return 48 + k - kb.KEY_KP_0;
+    }
+    switch (k) {
+        case kb.KEY_KP_DECIMAL: {
+            return 46;
+        }
+        case kb.KEY_KP_DIVIDE: {
+            return 47;
+        }
+        case kb.KEY_KP_MULTIPLY: {
+            return 42;
+        }
+        case kb.KEY_KP_SUBTRACT: {
+            return 45;
+        }
+        case kb.KEY_KP_ADD: {
+            return 43;
+        }
+        case kb.KEY_KP_ENTER: {
+            return 10;
+        }
+        case kb.KEY_KP_EQUAL: {
+            return 61;
+        }
+        case kb.KEY_SPACE: {
+            return 32;
+        }
+        case kb.KEY_APOSTROPHE: {
+            if (shift == 1) {
+                return 34;
+            }
+            return 39;
+        }
+        case kb.KEY_COMMA: {
+            if (shift == 1) {
+                return 60;
+            }
+            return 44;
+        }
+        case kb.KEY_MINUS: {
+            if (shift == 1) {
+                return 95;
+            }
+            return 45;
+        }
+        case kb.KEY_PERIOD: {
+            if (shift == 1) {
+                return 62;
+            }
+            return 46;
+        }
+        case kb.KEY_SLASH: {
+            if (shift == 1) {
+                return 63;
+            }
+            return 47;
+        }
+        case kb.KEY_SEMICOLON: {
+            if (shift == 1) {
+                return 58;
+            }
+            return 59;
+        }
+        case kb.KEY_EQUAL: {
+            if (shift == 1) {
+                return 43;
+            }
+            return 61;
+        }
+        case kb.KEY_LEFT_BRACKET: {
+            if (shift == 1) {
+                return 123;
+            }
+            return 91;
+        }
+        case kb.KEY_BACKSLASH: {
+            if (shift == 1) {
+                return 124;
+            }
+            return 92;
+        }
+        case kb.KEY_RIGHT_BRACKET: {
+            if (shift == 1) {
+                return 125;
+            }
+            return 93;
+        }
+        case kb.KEY_GRAVE: {
+            if (shift == 1) {
+                return 126;
+            }
+            return 96;
+        }
+        case kb.KEY_ENTER: {
+            return 10;
+        }
+        case kb.KEY_BACKSPACE: {
+            return 8;
+        }
+        case kb.KEY_TAB: {
+            return 9;
+        }
+        case kb.KEY_ESCAPE: {
+            return 27;
+        }
+        case kb.KEY_DELETE: {
+            return 127;
+        }
+    }
+    return 0;
+}
+
+/// the character typed in the last poll (fresh press or key repeat), 0 when there is none; nothing is typed
+/// while Ctrl or Alt is held
+function kbd_char(): u32 {
+    if (kbd_event == 0 || kbd_ctrl == 1 || kbd_alt == 1) {
+        return 0;
+    }
+    return kbd_ascii(kbd_event, kbd_shift, kbd_caps);
+}
+
+/// ---------------------------------------------------------------- mouse
+
+/// masks for mouse_down() / mouse_pressed() / mouse_released() and the bits of mouse_btn
+const MOUSE_LEFT = 1;
+const MOUSE_RIGHT = 2;
+const MOUSE_MIDDLE = 4;
+
+let mouse_x: i32;
+let mouse_y: i32;
+let mouse_btn: u32;
+let mouse_prev_btn: u32;
+
+/// 0 = coordinates in pixels, 1 = coordinates in text cells (the mode stays until it is changed)
+function mouse_mode(text_cells: u32) {
+    out(std.BUS_DEV_MOUSE, std.MOUSE_PORT_MODE, text_cells);
+}
+
+/// reads position and buttons; call it once per frame
+function mouse_poll() {
+    mouse_prev_btn = mouse_btn;
+    mouse_x = i32(in(std.BUS_DEV_MOUSE, std.MOUSE_PORT_X));
+    mouse_y = i32(in(std.BUS_DEV_MOUSE, std.MOUSE_PORT_Y));
+    mouse_btn = in(std.BUS_DEV_MOUSE, std.MOUSE_PORT_BUTTONS);
+}
+
+/// button bit masks: MOUSE_LEFT = 1, MOUSE_RIGHT = 2, MOUSE_MIDDLE = 4
+function mouse_down(mask: u32): u32 {
+    if (mouse_btn & mask != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 when a button of the mask went down in this poll
+function mouse_pressed(mask: u32): u32 {
+    if (mouse_btn & mask != 0 && mouse_prev_btn & mask == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 when a button of the mask went up in this poll
+function mouse_released(mask: u32): u32 {
+    if (mouse_btn & mask == 0 && mouse_prev_btn & mask != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// left button went down in this poll
+function mouse_clicked(): u32 {
+    return mouse_pressed(1);
+}
+
+/// is the mouse inside the rectangle?
+function mouse_in(x: i32, y: i32, w: i32, h: i32): u32 {
+    if (mouse_x < x || mouse_x >= x + w || mouse_y < y || mouse_y >= y + h) {
+        return 0;
+    }
+    return 1;
+}

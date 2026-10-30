@@ -1,0 +1,195 @@
+module audio;
+import "math.obj";
+include "../inc/std.quartz";
+
+/// Sound: builds an 8 bit mono WAV in RAM (8 kHz, up to 2 seconds) and plays it through the audio
+/// device. Several tones and pauses can be chained before a single audio_play().
+///
+///   audio_reset();
+///   audio_tone(audio_note_freq(60), 200, AUDIO_SINE);     // middle C for 200 ms
+///   audio_silence(50);
+///   audio_tone(audio_note_freq(64), 200, AUDIO_SINE);
+///   audio_play();
+///   audio_beep(440, 100);                                 // shortcut for a single square beep
+///
+/// RAM: about 16 KB for the sound (2 seconds at 8 kHz).
+
+const AUDIO_RATE = 8000;
+const AUDIO_MAX = 16000;
+const AUDIO_SQUARE = 0;
+const AUDIO_SINE = 1;
+const AUDIO_TRIANGLE = 2;
+const AUDIO_SAW = 3;
+const AUDIO_NOISE = 4;
+
+let audio_wav: u8[44 + AUDIO_MAX];
+/// samples written so far
+let audio_n: u32;
+let audio_phase: u32;
+/// amplitude 0 .. 127 (default 90)
+let audio_vol: i32 = 90;
+/// Every tone fades in and out over this many samples (8 samples = 1 ms, default 48 = 6 ms; 0 = no fading).
+/// Without it a tone ends at a random point of the wave and the jump from there to silence is heard as a click.
+let audio_ramp: u32 = 48;
+/// frequencies of the 12 notes C .. B in the octave of the middle C (MIDI notes 60 .. 71)
+/// one period of the sine, -128 .. 128 (made once at the start)
+let audio_sin: i16[256];
+let audio_octave: u16[12] = [262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494];
+
+/// the constant part of the WAV header (everything except the two sizes)
+function audio_header() {
+    let a: u32;
+
+    a = addr(audio_wav);
+    poke(a, u32, 0x46464952);
+    poke(a + 8, u32, 0x45564157);
+    poke(a + 12, u32, 0x20746D66);
+    poke(a + 16, u32, 16);
+    poke(a + 20, u16, 1);
+    poke(a + 22, u16, 1);
+    poke(a + 24, u32, AUDIO_RATE);
+    poke(a + 28, u32, AUDIO_RATE);
+    poke(a + 32, u16, 1);
+    poke(a + 34, u16, 8);
+    poke(a + 36, u32, 0x61746164);
+}
+
+/// throw away the recorded samples and start a new sound
+function audio_reset() {
+    audio_n = 0;
+    audio_phase = 0;
+}
+
+/// appends one sample, -128 .. 127 (0 = silence)
+function audio_sample(v: i32) {
+    if (audio_n < AUDIO_MAX) {
+        audio_wav[44 + audio_n] = u8(math_clamp(v, -128, 127) + 128);
+        audio_n++;
+    }
+}
+
+/// frequency of a MIDI note number (60 = middle C, 69 = A 440 Hz)
+function audio_note_freq(midi: u32): u32 {
+    let o: u32;
+    let f: u32;
+
+    o = midi / 12;
+    f = u32(audio_octave[midi % 12]);
+    if (o >= 5) {
+        return f << (o - 5);
+    }
+    return f >> (5 - o);
+}
+
+/// a tone of `ms` milliseconds; wave = AUDIO_SQUARE / SINE / TRIANGLE / SAW / NOISE. It fades in and out
+/// (audio_ramp), so its first and its last sample are silence (128) and chained tones do not click.
+/// (A tone costs about 25 VM instructions per sample, 8000 samples = one second of sound.)
+function audio_tone(freq: u32, ms: u32, wave: u32) {
+    let count: u32;
+    let i: u32;
+    let step: u32;
+    let ph: u32;
+    let at: u32;
+    let a: u32;
+    let vol: i32;
+    let v: i32;
+    let r: u32;
+
+    count = ms * AUDIO_RATE / 1000;
+    /// what does not fit into the buffer is not generated (and the fade out is at the real end)
+    if (audio_n + count > AUDIO_MAX) {
+        count = AUDIO_MAX - audio_n;
+    }
+    r = math_umin(audio_ramp, count / 2);
+    vol = math_clamp(audio_vol, 0, 127);
+    step = freq * 65536 / AUDIO_RATE;
+    ph = audio_phase;
+    at = addr(audio_wav) + 44 + audio_n;
+    /// the wave itself, one tight loop for each shape; the volume is applied here
+    if (wave == AUDIO_SQUARE) {
+        for (i of 0 .. count) {
+            if (((ph >> 8) & 255) < 128) {
+                poke(at + i, u8, u8(127 * vol / 128 + 128));
+            } else {
+                poke(at + i, u8, u8(-127 * vol / 128 + 128));
+            }
+            ph = ph + step;
+        }
+    } else if (wave == AUDIO_SINE) {
+        for (i of 0 .. count) {
+            poke(at + i, u8, u8(i32(audio_sin[(ph >> 8) & 255]) * vol / 128 + 128));
+            ph = ph + step;
+        }
+    } else if (wave == AUDIO_TRIANGLE) {
+        for (i of 0 .. count) {
+            a = (ph >> 8) & 255;
+            if (a < 128) {
+                v = i32(a) * 2 - 128;
+            } else {
+                v = 383 - i32(a) * 2;
+            }
+            poke(at + i, u8, u8(v * vol / 128 + 128));
+            ph = ph + step;
+        }
+    } else if (wave == AUDIO_SAW) {
+        for (i of 0 .. count) {
+            poke(at + i, u8, u8((i32((ph >> 8) & 255) - 128) * vol / 128 + 128));
+            ph = ph + step;
+        }
+    } else {
+        for (i of 0 .. count) {
+            poke(at + i, u8, u8((i32(math_rand_below(256)) - 128) * vol / 128 + 128));
+            ph = ph + step;
+        }
+    }
+    /// the envelope: the first and the last r samples are faded, 0 at the very ends
+    for (i of 0 .. r) {
+        v = i32(peek(at + i, u8)) - 128;
+        poke(at + i, u8, u8(v * i32(i) / i32(r) + 128));
+        v = i32(peek(at + count - 1 - i, u8)) - 128;
+        poke(at + count - 1 - i, u8, u8(v * i32(i) / i32(r) + 128));
+    }
+    audio_n = audio_n + count;
+    audio_phase = ph;
+}
+
+function audio_silence(ms: u32) {
+    let i: u32;
+
+    for (i of 0 .. ms * AUDIO_RATE / 1000) {
+        audio_sample(0);
+    }
+}
+
+/// sends the recorded sound to the speaker, returns 1 when the device took it
+function audio_play(): u32 {
+    let a: u32;
+
+    if (audio_n == 0 || bus_status(std.BUS_DEV_AUDIO) != 1) {
+        return 0;
+    }
+    a = addr(audio_wav);
+    poke(a + 4, u32, 36 + audio_n);
+    poke(a + 40, u32, audio_n);
+    outb(std.BUS_DEV_AUDIO, std.AUDIO_PORT_PLAY, a, 44 + audio_n);
+    return 1;
+}
+
+/// one square wave beep
+function audio_beep(freq: u32, ms: u32) {
+    audio_reset();
+    audio_tone(freq, ms, AUDIO_SQUARE);
+    audio_play();
+}
+
+/// the table of the sine
+function audio_make_table() {
+    let k: u32;
+
+    for (k of 0 .. 256) {
+        audio_sin[k] = i16(math_sin(i32(k)) / 2);
+    }
+}
+
+audio_header();
+audio_make_table();

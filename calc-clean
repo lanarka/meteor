@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+
+rm -rf calc/*.json
+rm -rf calc/*.obj
+rm -rf calc/*.quartz
+rm -rf calc/*.bin
+rm -rf calc/*.bin.data-map

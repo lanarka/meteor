@@ -1,0 +1,30 @@
+program "Multiplication table (colours, cursor positioning, padded numbers; lib/text)";
+import "../lib/text.obj";
+import "../lib/sys.obj";
+
+const N = 9;
+
+let i: u32;
+let j: u32;
+let title: u8[] = "Multiplication table";
+
+bus_reset(std.BUS_DEV_VIDEO_TEXT);
+text_clear();
+text_color(COLOR_CYAN, COLOR_BLACK);
+text_print_at(2, 0, addr(title));
+text_color(COLOR_YELLOW, COLOR_BLACK);
+text_goto(2, 2);
+text_print_uint_pad(0, 3, 32);
+for (j of 1 .. N + 1) {
+    text_print_uint_pad(j, 4, 32);
+}
+for (i of 1 .. N + 1) {
+    text_goto(2, i + 2);
+    text_color(COLOR_YELLOW, COLOR_BLACK);
+    text_print_uint_pad(i, 3, 32);
+    text_color(COLOR_WHITE, COLOR_BLACK);
+    for (j of 1 .. N + 1) {
+        text_print_uint_pad(i * j, 4, 32);
+    }
+}
+sys_idle();

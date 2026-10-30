@@ -1,0 +1,132 @@
+module calc_engine;
+import "../lib/str.obj";
+
+/// The brain of the calculator, without any user interface: + - * / on i32 numbers, chained
+/// operators (1 + 2 * 3 is evaluated left to right), '=' to finish, 'C' to clear and an error
+/// state after a division by zero. The UI only calls calc_reset(), calc_press(key) and
+/// calc_text(buffer) - it can be replaced without touching this file.
+///
+/// calc_press() takes the ASCII code of the key: '0'..'9', '+', '-', '*', '/', '=' or 'C'.
+
+let calc_acc: i32;
+let calc_cur: i32;
+/// pending operator: 0 = none, 1 = +, 2 = -, 3 = *, 4 = /
+let calc_op: u32;
+let calc_error: u32;
+/// 1 = the next digit starts a new number
+let calc_fresh: u32;
+let calc_apply_err: u32;
+let calc_err_text: u8[] = "Err";
+
+function calc_reset() {
+    calc_acc = 0;
+    calc_cur = 0;
+    calc_op = 0;
+    calc_error = 0;
+    calc_fresh = 0;
+}
+
+/// text of the display -> buf (zero terminated), "Err" while the error state is on; returns the length
+function calc_text(buf: u32): u32 {
+    if (calc_error != 0) {
+        return str_copy(buf, addr(calc_err_text));
+    }
+    return str_itoa(calc_cur, buf);
+}
+
+/// op: 1 + , 2 - , 3 * , 4 / ; calc_apply_err = 1 on division by zero (result 0); an unknown op returns acc
+function calc_apply(acc: i32, op: u32, cur: i32): i32 {
+    calc_apply_err = 0;
+    if (op == 1) {
+        return acc + cur;
+    } else if (op == 2) {
+        return acc - cur;
+    } else if (op == 3) {
+        return acc * cur;
+    } else if (op == 4) {
+        if (cur == 0) {
+            calc_apply_err = 1;
+            return 0;
+        }
+        return acc / cur;
+    }
+    return acc;
+}
+
+function calc_fail() {
+    calc_error = 1;
+    calc_acc = 0;
+    calc_cur = 0;
+    calc_op = 0;
+}
+
+/// dispatch on the key that was pressed (its ASCII code)
+function calc_press(c: u32) {
+    let r: i32;
+    let newop: u32;
+
+    if (calc_error != 0) {
+        /// while showing an error only C does anything
+        if (c == 67) {
+            calc_reset();
+        }
+        return;
+    }
+    if (c >= 48 && c <= 57) {
+        /// digit: a finished result / pending operator starts a new number
+        if (calc_fresh != 0) {
+            calc_cur = 0;
+            calc_fresh = 0;
+        }
+        if (calc_cur > 99999) {
+            return;
+        }
+        calc_cur = calc_cur * 10 + i32(c - 48);
+        return;
+    }
+    if (c == 67) {
+        calc_reset();
+        return;
+    }
+    if (c == 61) {
+        /// = : apply the pending operator
+        if (calc_op == 0) {
+            return;
+        }
+        r = calc_apply(calc_acc, calc_op, calc_cur);
+        if (calc_apply_err == 1) {
+            calc_fail();
+            return;
+        }
+        calc_acc = r;
+        calc_cur = r;
+        calc_op = 0;
+        calc_fresh = 1;
+        return;
+    }
+    /// operator key: + - * /  ->  1 2 3 4
+    if (c == 43) {
+        newop = 1;
+    } else if (c == 45) {
+        newop = 2;
+    } else if (c == 42) {
+        newop = 3;
+    } else if (c == 47) {
+        newop = 4;
+    } else {
+        return;
+    }
+    if (calc_op != 0) {
+        /// a previous operator is pending: fold it in first (chaining)
+        r = calc_apply(calc_acc, calc_op, calc_cur);
+        if (calc_apply_err == 1) {
+            calc_fail();
+            return;
+        }
+        calc_acc = r;
+    } else {
+        calc_acc = calc_cur;
+    }
+    calc_op = newop;
+    calc_fresh = 1;
+}

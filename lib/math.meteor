@@ -1,0 +1,297 @@
+module math;
+
+/// Integer (and a little f32) maths. The VM has no int <-> float conversion, so trigonometry is
+/// done in fixed point: angles are 0..255 (256 = one full turn), results are scaled by 256.
+
+let math_sin_tab: i16[65] = [0, 6, 13, 19, 25, 31, 38, 44, 50, 56, 62, 68, 74, 80, 86, 92, 98, 104, 109, 115, 121, 126, 132, 137, 142, 147, 152, 157, 162, 167, 172, 177, 181, 185, 190, 194, 198, 202, 206, 209, 213, 216, 220, 223, 226, 229, 231, 234, 237, 239, 241, 243, 245, 247, 248, 250, 251, 252, 253, 254, 255, 255, 256, 256, 256];
+
+/// absolute value
+function math_abs(v: i32): i32 {
+    if (v < 0) {
+        return -v;
+    }
+    return v;
+}
+
+/// -1, 0 or 1
+function math_sign(v: i32): i32 {
+    if (v < 0) {
+        return -1;
+    }
+    if (v > 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// the smaller of two i32 values
+function math_min(a: i32, b: i32): i32 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+/// the larger of two i32 values
+function math_max(a: i32, b: i32): i32 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+/// v limited to the range lo .. hi
+function math_clamp(v: i32, lo: i32, hi: i32): i32 {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+/// the smaller of two u32 values
+function math_umin(a: u32, b: u32): u32 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+/// the larger of two u32 values
+function math_umax(a: u32, b: u32): u32 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+/// positive modulo: math_wrap(-1, 10) = 9 (handy for torus worlds and ring buffers)
+function math_wrap(v: i32, n: i32): i32 {
+    return ((v % n) + n) % n;
+}
+
+/// linear remap of v from [in_lo, in_hi] to [out_lo, out_hi]
+function math_map(v: i32, in_lo: i32, in_hi: i32, out_lo: i32, out_hi: i32): i32 {
+    return out_lo + (v - in_lo) * (out_hi - out_lo) / (in_hi - in_lo);
+}
+
+/// greatest common divisor (Euclid)
+function math_gcd(a: i32, b: i32): i32 {
+    let t: i32;
+
+    a = math_abs(a);
+    b = math_abs(b);
+    while (b != 0) {
+        t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+/// least common multiple (0 when one of the numbers is 0)
+function math_lcm(a: i32, b: i32): i32 {
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    return math_abs(a / math_gcd(a, b) * b);
+}
+
+/// integer power, base ^ exp (wraps on overflow)
+function math_pow(base: i32, exp: u32): i32 {
+    let r: i32;
+
+    r = 1;
+    while (exp > 0) {
+        if (exp & 1 != 0) {
+            r = r * base;
+        }
+        base = base * base;
+        exp = exp >> 1;
+    }
+    return r;
+}
+
+/// floor(sqrt(n))
+function math_isqrt(n: u32): u32 {
+    let res: u32;
+    let bit: u32;
+
+    res = 0;
+    bit = 1 << 30;
+    while (bit > n) {
+        bit = bit >> 2;
+    }
+    while (bit != 0) {
+        if (n >= res + bit) {
+            n = n - (res + bit);
+            res = (res >> 1) + bit;
+        } else {
+            res = res >> 1;
+        }
+        bit = bit >> 2;
+    }
+    return res;
+}
+
+/// distance of (dx, dy) from the origin, rounded down
+function math_hypot(dx: i32, dy: i32): u32 {
+    return math_isqrt(u32(dx * dx + dy * dy));
+}
+
+/// sin of an angle in 1/256 turns, scaled by 256: math_sin(64) = 256, math_sin(192) = -256
+function math_sin(a: i32): i32 {
+    let q: i32;
+    let i: i32;
+
+    a = a & 255;
+    q = a / 64;
+    i = a % 64;
+    switch (q) {
+        case 0: {
+            return i32(math_sin_tab[i]);
+        }
+        case 1: {
+            return i32(math_sin_tab[64 - i]);
+        }
+        case 2: {
+            return -i32(math_sin_tab[i]);
+        }
+        default: {
+            return -i32(math_sin_tab[64 - i]);
+        }
+    }
+    return 0;
+}
+
+/// cosine, the same units as math_sin: math_cos(0) = 256
+function math_cos(a: i32): i32 {
+    return math_sin(a + 64);
+}
+
+/// random u32 in 0 .. n-1 (rnd() only takes a constant, so a large random number is reduced with %)
+function math_rand_below(n: u32): u32 {
+    return rnd(0x3FFFFFFF) % n;
+}
+
+/// random integer in lo .. hi (both included)
+function math_rand(lo: i32, hi: i32): i32 {
+    return lo + i32(math_rand_below(u32(hi - lo + 1)));
+}
+
+/// 1 with the probability 1/n, otherwise 0
+function math_chance(n: u32): u32 {
+    if (math_rand_below(n) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// absolute value of a float
+function math_absf(v: f32): f32 {
+    if (v < 0.0) {
+        return -v;
+    }
+    return v;
+}
+
+/// the smaller of two floats
+function math_minf(a: f32, b: f32): f32 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+/// the larger of two floats
+function math_maxf(a: f32, b: f32): f32 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+/// Newton square root (0 for v <= 0)
+function math_sqrtf(v: f32): f32 {
+    let g: f32;
+    let n: i32;
+
+    if (v <= 0.0) {
+        return 0.0;
+    }
+    g = v;
+    if (g > 1.0) {
+        g = v * 0.5;
+    }
+    for (n of 0 .. 24) {
+        g = (g + v / g) * 0.5;
+    }
+    return g;
+}
+
+/// ---------------------------------------------------------------- int <-> float
+/// The VM cannot convert between integers and floats, but IEEE numbers can be built from their
+/// bits: the float with the bits 0x4B000000 | n is exactly 2^23 + n, so subtracting 2^23 leaves n.
+/// The reverse trick adds 1.5 * 2^23 and reads the low bits of the sum.
+
+let math_fbits: u32;
+
+/// n (|n| < 2^23) as a float, exact
+function math_stof(n: i32): f32 {
+    if (n < 0) {
+        math_fbits = 0x4B000000 | u32(-n);
+        return 8388608.0 - peek(addr(math_fbits), f32);
+    }
+    math_fbits = 0x4B000000 | u32(n);
+    return peek(addr(math_fbits), f32) - 8388608.0;
+}
+
+/// any i32 as a float (above 2^23 the result is rounded like every f32)
+function math_itof(v: i32): f32 {
+    let hi: i32;
+
+    if (v > -8388608 && v < 8388608) {
+        return math_stof(v);
+    }
+    hi = v / 4096;
+    return math_stof(hi) * 4096.0 + math_stof(v - hi * 4096);
+}
+
+/// float -> nearest integer (halves go to the even neighbour); |f| must be below 4194304
+function math_ftoi_round(f: f32): i32 {
+    if (f > 4194303.0) {
+        return 4194303;
+    }
+    if (f < -4194303.0) {
+        return -4194303;
+    }
+    poke(addr(math_fbits), f32, f + 12582912.0);
+    return i32(math_fbits & 0x7FFFFF) - 4194304;
+}
+
+/// float -> integer, rounded down (the next smaller integer for negative numbers)
+function math_ffloor(f: f32): i32 {
+    let r: i32;
+
+    r = math_ftoi_round(f);
+    if (math_stof(r) > f) {
+        r--;
+    }
+    return r;
+}
+
+/// float -> integer, cut towards zero like a C cast
+function math_ftoi(f: f32): i32 {
+    let r: i32;
+
+    r = math_ftoi_round(f);
+    if (f > 0.0 && math_stof(r) > f) {
+        r--;
+    }
+    if (f < 0.0 && math_stof(r) < f) {
+        r++;
+    }
+    return r;
+}

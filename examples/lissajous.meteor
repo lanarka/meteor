@@ -1,0 +1,82 @@
+program "lissajous - the curve x = sin(a*t), y = sin(b*t) drawn as a glowing line: every frame the screen is covered by a faint black layer (alpha blending!) so old parts fade away, and the colour walks around the rainbow. Left / Right change the frequency ratio a:b, Up / Down the phase speed. (lib/gfx, lib/colors, lib/math, lib/gtext, lib/input)";
+import "../lib/gtext.obj";
+import "../lib/input.obj";
+import "../lib/str.obj";
+/// lib/gtext keeps a glyph cache of ~66 KB
+ram(size: 262144);
+
+const CX = 320;
+const CY = 240;
+const R = 220;
+
+let a: i32 = 3;
+let b: i32 = 2;
+let t: i32;
+let phase: i32;
+let phase_speed: i32 = 1;
+let hue: u32;
+let x0: i32;
+let y0: i32;
+let x1: i32;
+let y1: i32;
+let k: u32;
+let caption: u8[16];
+let n: u32;
+
+function point_x(tt: i32): i32 {
+    return CX + math_sin(a * tt + phase) * R / 256;
+}
+
+function point_y(tt: i32): i32 {
+    return CY + math_sin(b * tt) * (R - 40) / 256;
+}
+
+function draw_label() {
+    gfx_fill_rect(8, 8, 80, 20, COLOR_BLACK);
+    n = str_itoa(a, addr(caption));
+    caption[n] = 58;
+    str_itoa(b, addr(caption) + n + 1);
+    gtext(12, 10, addr(caption), COLOR_GRAY);
+}
+
+gfx_clear(COLOR_BLACK);
+draw_label();
+x0 = point_x(0);
+y0 = point_y(0);
+loop {
+    kbd_poll();
+    if (kbd_pressed(kb.KEY_RIGHT) == 1 && b < 9) {
+        b++;
+        draw_label();
+    }
+    if (kbd_pressed(kb.KEY_LEFT) == 1 && b > 1) {
+        b--;
+        draw_label();
+    }
+    if (kbd_pressed(kb.KEY_UP) == 1 && a < 9) {
+        a++;
+        draw_label();
+    }
+    if (kbd_pressed(kb.KEY_DOWN) == 1 && a > 1) {
+        a--;
+        draw_label();
+    }
+    /// fade the old picture a little (a translucent black layer)
+    gfx_fill_rect(0, 36, 640, 444, color_alpha(COLOR_BLACK, 14));
+    /// 5 new segments per frame
+    for (k of 0 .. 5) {
+        t++;
+        x1 = point_x(t);
+        y1 = point_y(t);
+        gfx_line(x0, y0, x1, y1, color_hue(hue));
+        gfx_line(x0 + 1, y0, x1 + 1, y1, color_hue(hue));
+        x0 = x1;
+        y0 = y1;
+    }
+    hue = hue + 1;
+    if (t % 256 < 5) {
+        /// the phase drifts, so the figure slowly rotates in 3D-looking fashion
+        phase = phase + phase_speed;
+    }
+    gfx_vsync();
+}

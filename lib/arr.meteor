@@ -1,0 +1,149 @@
+module arr;
+import "math.obj";
+
+/// Helpers for i32 arrays. An array is passed as its RAM address, n is the number of elements:
+///
+///   let data: i32[8] = [5, 3, 9, -1, 7, 2, 8, 4];
+///   arr_sort_i32(addr(data), len(data));
+///   i = arr_bsearch_i32(addr(data), len(data), 7);
+
+/// element i
+function arr_get_i32(a: u32, i: u32): i32 {
+    return peek(a + i * 4, i32);
+}
+
+/// sets element i
+function arr_set_i32(a: u32, i: u32, v: i32) {
+    poke(a + i * 4, i32, v);
+}
+
+/// swaps the elements i and j
+function arr_swap_i32(a: u32, i: u32, j: u32) {
+    let t: i32;
+
+    t = arr_get_i32(a, i);
+    arr_set_i32(a, i, arr_get_i32(a, j));
+    arr_set_i32(a, j, t);
+}
+
+/// sets all n elements to v
+function arr_fill_i32(a: u32, n: u32, v: i32) {
+    let i: u32;
+
+    for (i of 0 .. n) {
+        arr_set_i32(a, i, v);
+    }
+}
+
+/// ascending order (shell sort, in place)
+function arr_sort_i32(a: u32, n: u32) {
+    let gap: u32;
+    let i: u32;
+    let j: u32;
+    let t: i32;
+
+    gap = n / 2;
+    while (gap > 0) {
+        for (i of gap .. n) {
+            t = arr_get_i32(a, i);
+            j = i;
+            while (j >= gap && arr_get_i32(a, j - gap) > t) {
+                arr_set_i32(a, j, arr_get_i32(a, j - gap));
+                j = j - gap;
+            }
+            arr_set_i32(a, j, t);
+        }
+        gap = gap / 2;
+    }
+}
+
+/// index of key in an array sorted ascending, or -1
+function arr_bsearch_i32(a: u32, n: u32, key: i32): i32 {
+    let lo: i32;
+    let hi: i32;
+    let mid: i32;
+    let v: i32;
+
+    lo = 0;
+    hi = i32(n) - 1;
+    while (lo <= hi) {
+        mid = (lo + hi) / 2;
+        v = arr_get_i32(a, u32(mid));
+        if (v == key) {
+            return mid;
+        } else if (v < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+/// index of the first element equal to key, or -1 (any order)
+function arr_index_of_i32(a: u32, n: u32, key: i32): i32 {
+    let i: u32;
+
+    for (i of 0 .. n) {
+        if (arr_get_i32(a, i) == key) {
+            return i32(i);
+        }
+    }
+    return -1;
+}
+
+/// the smallest element
+function arr_min_i32(a: u32, n: u32): i32 {
+    let i: u32;
+    let m: i32;
+
+    m = arr_get_i32(a, 0);
+    for (i of 1 .. n) {
+        m = math_min(m, arr_get_i32(a, i));
+    }
+    return m;
+}
+
+/// the largest element
+function arr_max_i32(a: u32, n: u32): i32 {
+    let i: u32;
+    let m: i32;
+
+    m = arr_get_i32(a, 0);
+    for (i of 1 .. n) {
+        m = math_max(m, arr_get_i32(a, i));
+    }
+    return m;
+}
+
+/// sum of all elements
+function arr_sum_i32(a: u32, n: u32): i32 {
+    let i: u32;
+    let s: i32;
+
+    s = 0;
+    for (i of 0 .. n) {
+        s = s + arr_get_i32(a, i);
+    }
+    return s;
+}
+
+/// reverses the order of the elements in place
+function arr_reverse_i32(a: u32, n: u32) {
+    let i: u32;
+
+    for (i of 0 .. n / 2) {
+        arr_swap_i32(a, i, n - 1 - i);
+    }
+}
+
+/// random permutation (Fisher - Yates), e.g. a shuffled deck of cards
+function arr_shuffle_i32(a: u32, n: u32) {
+    let i: u32;
+
+    i = n;
+    while (i > 1) {
+        i--;
+        arr_swap_i32(a, i, math_rand_below(i + 1));
+    }
+}

@@ -1,0 +1,276 @@
+module str;
+
+/// Zero terminated byte strings. A string is passed around as its RAM address (u32), obtained
+/// with addr(variable). Functions never check buffer sizes - the caller owns the memory.
+
+let str_tmp: u8[34];
+
+/// length of a zero terminated string (without the zero)
+function str_len(s: u32): u32 {
+    let n: u32;
+
+    n = 0;
+    while (peek(s + n, u8) != 0) {
+        n++;
+    }
+    return n;
+}
+
+/// 1 for the characters 0 - 9
+function str_is_digit(c: u32): u32 {
+    if (c >= 48 && c <= 57) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 for the letters a - z and A - Z
+function str_is_alpha(c: u32): u32 {
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 for blank, tab, newline and the other white space characters
+function str_is_space(c: u32): u32 {
+    if (c == 32 || (c >= 9 && c <= 13)) {
+        return 1;
+    }
+    return 0;
+}
+
+/// the upper case form of one character code
+function str_upper_c(c: u32): u32 {
+    if (c >= 97 && c <= 122) {
+        return c - 32;
+    }
+    return c;
+}
+
+/// the lower case form of one character code
+function str_lower_c(c: u32): u32 {
+    if (c >= 65 && c <= 90) {
+        return c + 32;
+    }
+    return c;
+}
+
+/// converts the string in place to upper case
+function str_upper(s: u32) {
+    let c: u32;
+
+    c = u32(peek(s, u8));
+    while (c != 0) {
+        poke(s, u8, u8(str_upper_c(c)));
+        s++;
+        c = u32(peek(s, u8));
+    }
+}
+
+/// converts the string in place to lower case
+function str_lower(s: u32) {
+    let c: u32;
+
+    c = u32(peek(s, u8));
+    while (c != 0) {
+        poke(s, u8, u8(str_lower_c(c)));
+        s++;
+        c = u32(peek(s, u8));
+    }
+}
+
+/// <0, 0, >0 like strcmp
+function str_cmp(a: u32, b: u32): i32 {
+    let ca: u32;
+    let cb: u32;
+
+    loop {
+        ca = u32(peek(a, u8));
+        cb = u32(peek(b, u8));
+        if (ca != cb) {
+            return i32(ca) - i32(cb);
+        }
+        if (ca == 0) {
+            return 0;
+        }
+        a++;
+        b++;
+    }
+    return 0;
+}
+
+/// 1 when two strings are equal
+function str_eq(a: u32, b: u32): u32 {
+    if (str_cmp(a, b) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+/// 1 when s starts with prefix
+function str_starts(s: u32, prefix: u32): u32 {
+    let c: u32;
+
+    loop {
+        c = u32(peek(prefix, u8));
+        if (c == 0) {
+            return 1;
+        }
+        if (u32(peek(s, u8)) != c) {
+            return 0;
+        }
+        s++;
+        prefix++;
+    }
+    return 0;
+}
+
+/// copies src (with the terminating zero) to dst, returns the length
+function str_copy(dst: u32, src: u32): u32 {
+    let n: u32;
+    let c: u32;
+
+    n = 0;
+    loop {
+        c = u32(peek(src + n, u8));
+        poke(dst + n, u8, u8(c));
+        if (c == 0) {
+            return n;
+        }
+        n++;
+    }
+    return n;
+}
+
+/// appends src to the string in dst, returns the new length
+function str_cat(dst: u32, src: u32): u32 {
+    return str_len(dst) + str_copy(dst + str_len(dst), src);
+}
+
+/// index of the first c in s, or -1
+function str_find_c(s: u32, c: u32): i32 {
+    let i: i32;
+    let x: u32;
+
+    i = 0;
+    loop {
+        x = u32(peek(s + u32(i), u8));
+        if (x == c) {
+            return i;
+        }
+        if (x == 0) {
+            return -1;
+        }
+        i++;
+    }
+    return -1;
+}
+
+/// index of the first occurrence of needle in hay, or -1
+function str_find(hay: u32, needle: u32): i32 {
+    let i: u32;
+    let n: u32;
+    let h: u32;
+
+    n = str_len(needle);
+    h = str_len(hay);
+    if (n > h) {
+        return -1;
+    }
+    for (i of 0 .. h - n + 1) {
+        if (str_starts(hay + i, needle) == 1) {
+            return i32(i);
+        }
+    }
+    return -1;
+}
+
+/// number v in the given base (2..16, capital letters) -> buf (zero terminated), returns the length
+function str_utoa_base(v: u32, base: u32, buf: u32): u32 {
+    let n: u32;
+    let d: u32;
+    let k: u32;
+
+    n = 0;
+    do {
+        d = v % base;
+        if (d < 10) {
+            str_tmp[n] = u8(d + 48);
+        } else {
+            str_tmp[n] = u8(d + 55);
+        }
+        n++;
+        v = v / base;
+    } while (v != 0);
+    k = 0;
+    while (k < n) {
+        poke(buf + k, u8, str_tmp[n - 1 - k]);
+        k++;
+    }
+    poke(buf + n, u8, 0);
+    return n;
+}
+
+/// unsigned decimal -> buf (zero terminated), returns the length
+function str_utoa(v: u32, buf: u32): u32 {
+    return str_utoa_base(v, 10, buf);
+}
+
+/// signed decimal -> buf, returns the length
+function str_itoa(v: i32, buf: u32): u32 {
+    if (v < 0) {
+        poke(buf, u8, 45);
+        return 1 + str_utoa(u32(-v), buf + 1);
+    }
+    return str_utoa(u32(v), buf);
+}
+
+/// exactly `digits` hex digits (no prefix) -> buf
+function str_hex(v: u32, digits: u32, buf: u32): u32 {
+    let i: u32;
+    let d: u32;
+
+    for (i of 0 .. digits) {
+        d = (v >> ((digits - 1 - i) * 4)) & 15;
+        if (d < 10) {
+            poke(buf + i, u8, u8(d + 48));
+        } else {
+            poke(buf + i, u8, u8(d + 55));
+        }
+    }
+    poke(buf + digits, u8, 0);
+    return digits;
+}
+
+/// parses an optional sign and decimal digits, stops at the first other character
+function str_atoi(s: u32): i32 {
+    let neg: u32;
+    let v: i32;
+    let c: u32;
+
+    while (str_is_space(u32(peek(s, u8))) == 1) {
+        s++;
+    }
+    neg = 0;
+    c = u32(peek(s, u8));
+    if (c == 45) {
+        neg = 1;
+        s++;
+    } else if (c == 43) {
+        s++;
+    }
+    v = 0;
+    loop {
+        c = u32(peek(s, u8));
+        if (str_is_digit(c) == 0) {
+            break;
+        }
+        v = v * 10 + i32(c - 48);
+        s++;
+    }
+    if (neg == 1) {
+        return -v;
+    }
+    return v;
+}

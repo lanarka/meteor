@@ -1,0 +1,69 @@
+program "starfield - flying through 240 stars. A star at (x, y, z) is drawn at centre + (x, y) * 128 / z, so it flies outwards as z shrinks, and gets brighter and bigger when it is close. The vanishing point follows the mouse. No floats needed. (lib/gfx, lib/colors, lib/math, lib/input)";
+import "../lib/gfx.obj";
+import "../lib/input.obj";
+
+const STARS = 240;
+const Z_MAX = 256;
+
+let sx: i32[STARS];
+let sy: i32[STARS];
+let sz: i32[STARS];
+let cx: i32 = 320;
+let cy: i32 = 240;
+let speed: i32 = 3;
+let i: u32;
+let px: i32;
+let py: i32;
+let b: u32;
+
+function respawn(k: u32, far: u32) {
+    sx[k] = math_rand(-320, 320);
+    sy[k] = math_rand(-240, 240);
+    if (far == 1) {
+        sz[k] = Z_MAX;
+    } else {
+        sz[k] = math_rand(1, Z_MAX);
+    }
+}
+
+for (i of 0 .. STARS) {
+    respawn(i, 0);
+}
+mouse_mode(0);
+loop {
+    kbd_poll();
+    mouse_poll();
+    /// the vanishing point follows the mouse once it has moved
+    if (mouse_x != 0 || mouse_y != 0) {
+        cx = mouse_x;
+        cy = mouse_y;
+    }
+    if (kbd_pressed(kb.KEY_UP) == 1 && speed < 12) {
+        speed++;
+    }
+    if (kbd_pressed(kb.KEY_DOWN) == 1 && speed > 1) {
+        speed--;
+    }
+    gfx_clear(COLOR_BLACK);
+    for (i of 0 .. STARS) {
+        sz[i] = sz[i] - speed;
+        if (sz[i] <= 0) {
+            respawn(i, 1);
+        }
+        px = cx + sx[i] * 128 / sz[i];
+        py = cy + sy[i] * 128 / sz[i];
+        if (px >= 0 && px < gfx_w - 1 && py >= 0 && py < gfx_h - 1) {
+            /// brightness grows as the star comes closer
+            b = u32(255 - sz[i]);
+            if (sz[i] < 70) {
+                gfx_fill_rect(px, py, 2, 2, color_gray(b));
+            } else {
+                gfx_plot(u32(px), u32(py), color_gray(b));
+            }
+        } else if (sz[i] < Z_MAX) {
+            /// left the screen: start again in the distance
+            respawn(i, 1);
+        }
+    }
+    gfx_vsync();
+}

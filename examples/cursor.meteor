@@ -1,0 +1,14 @@
+program "cursor - a custom mouse cursor with real alpha over a full-screen background; the screen size is read from the video device (port of cursor.quartz, uses lib/cursor + lib/input)";
+import "../lib/cursor.obj";
+import "../lib/input.obj";
+
+/// mouse reads pixel coordinates for the whole run - stage that once
+mouse_mode(0);
+loop {
+    /// redraw the whole background (replaces a clear)
+    gfx_clear(0xFF555555);
+    mouse_poll();
+    /// the cursor, composited with real alpha
+    cursor_draw(mouse_x, mouse_y, COLOR_WHITE);
+    gfx_vsync();
+}

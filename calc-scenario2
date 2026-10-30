@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# the calculator with the wallpaper in an external data segment (--ext-data): a much faster build
+./build-modules && ./calc-build --ext-data &&
+quartz calc/calc.bin --ram 8388608

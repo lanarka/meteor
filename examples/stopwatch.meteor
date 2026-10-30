@@ -1,0 +1,107 @@
+program "stopwatch - Space starts / stops, L records a lap (the last 8 are listed), R resets, Esc quits. The time comes from the wall clock in milliseconds (sys_millis), so it is right whatever the frame rate is; sys_ticks() would only count frames. (lib/tui, lib/input, lib/sys)";
+import "../lib/tui.obj";
+import "../lib/input.obj";
+import "../lib/str.obj";
+
+const BG = 0xFF400000;
+const LAPS = 8;
+
+let running: u32;
+/// elapsed time that was collected before the last start (ms), and the tick of the last start
+let elapsed_before: u32;
+let started_at: u32;
+let laps: u32[LAPS];
+let lap_count: u32;
+let buf: u8[16];
+let s_title: u8[] = " Stopwatch ";
+let s_keys: u8[] = "Space start/stop   L lap   R reset   Esc quit";
+let s_laps: u8[] = "Laps";
+let s_run: u8[] = "RUNNING";
+let s_stop: u8[] = "STOPPED";
+/// the screen is drawn again only while the time runs and after a key (the text screen keeps what was drawn)
+let dirty: u32 = 1;
+let i: u32;
+
+function now_ms(): u32 {
+    if (running == 1) {
+        return elapsed_before + (sys_millis() - started_at);
+    }
+    return elapsed_before;
+}
+
+/// ms -> "MM:SS.cc" in buf
+function format_time(ms: u32) {
+    let cs: u32;
+    let sec: u32;
+    let mins: u32;
+
+    cs = ms / 10 % 100;
+    sec = ms / 1000 % 60;
+    mins = ms / 60000 % 100;
+    buf[0] = u8(48 + mins / 10);
+    buf[1] = u8(48 + mins % 10);
+    buf[2] = 58;
+    buf[3] = u8(48 + sec / 10);
+    buf[4] = u8(48 + sec % 10);
+    buf[5] = 46;
+    buf[6] = u8(48 + cs / 10);
+    buf[7] = u8(48 + cs % 10);
+    buf[8] = 0;
+}
+
+function draw() {
+    let shown: u32;
+
+    tui_clear(COLOR_GRAY, COLOR_DARK_BLUE);
+    tui_window(22, 4, 36, 21, addr(s_title), COLOR_WHITE, BG, COLOR_YELLOW);
+    format_time(now_ms());
+    tui_str_center(22, 36, 7, addr(buf), COLOR_WHITE, BG);
+    if (running == 1) {
+        tui_str_center(22, 36, 9, addr(s_run), COLOR_GREEN, BG);
+    } else {
+        tui_str_center(22, 36, 9, addr(s_stop), COLOR_RED, BG);
+    }
+    tui_str(25, 12, addr(s_laps), COLOR_YELLOW, BG);
+    /// the newest lap on top
+    shown = math_umin(lap_count, LAPS);
+    for (i of 0 .. shown) {
+        format_time(laps[(lap_count - 1 - i) % LAPS]);
+        tui_int(25, 13 + i, i32(lap_count - i), 3, COLOR_GRAY, BG);
+        tui_str(30, 13 + i, addr(buf), COLOR_WHITE, BG);
+    }
+    tui_str_center(22, 36, 23, addr(s_keys), COLOR_GRAY, BG);
+}
+
+text_cursor(0);
+loop {
+    kbd_poll();
+    if (kbd_pressed(kb.KEY_ESCAPE) == 1) {
+        halt;
+    }
+    if (kbd_pressed(kb.KEY_SPACE) == 1) {
+        dirty = 1;
+        if (running == 1) {
+            elapsed_before = now_ms();
+            running = 0;
+        } else {
+            started_at = sys_millis();
+            running = 1;
+        }
+    }
+    if (kbd_pressed(kb.KEY_L) == 1 && running == 1) {
+        dirty = 1;
+        laps[lap_count % LAPS] = now_ms();
+        lap_count++;
+    }
+    if (kbd_pressed(kb.KEY_R) == 1) {
+        dirty = 1;
+        running = 0;
+        elapsed_before = 0;
+        lap_count = 0;
+    }
+    if (running == 1 || dirty == 1) {
+        draw();
+        dirty = 0;
+    }
+    sys_vsync();
+}
