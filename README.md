@@ -472,3 +472,8 @@ first version (`src/font_*_sheet.png`, `png2bin_fontsheet.py`) are no longer use
 * Because registers only live for one statement, the generated code is not fast (a pixel loop costs tens of
   instructions per pixel). The library therefore does the heavy work with block transfers, `memcpy`, and caches
   (see `gfx_fill_rect`, `gtext`); do the same in your programs.
+
+
+## Related repositories
+
+- QuartzVM [Quartz](https://github.com/lanarka/quartz)
