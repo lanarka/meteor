@@ -26,7 +26,6 @@ This repository is a proof of concept of the whole tool chain and of a standard 
 | `lib/` | the **Meteor standard library** - 19 modules, see [`lib/README.md`](lib/README.md) |
 | `examples/` | example programs, all of them built on the library |
 | `calc/` | a bigger project: a desktop with a calculator (a module + a program) |
-| `tools/` | the headless VM `qhead`, `fstool.py` for disk images, test and build helpers |
 | `doc/BACKEND.md` | the JSON AST that the backend reads (the format between the two compiler stages) |
 
 Contents: [Quick start](#quick-start) - [The machine](#the-quartz-vm-in-five-minutes) -
@@ -38,9 +37,7 @@ Contents: [Quick start](#quick-start) - [The machine](#the-quartz-vm-in-five-min
 ## Quick start
 
 Requirements: Python 3, `pip install lark pymongo` (the parser and the BSON reader). To *see* programs you
-need the Quartz VM binary `./quartz`, built from `quartz-src/` (it uses raylib). Without it you can still run
-everything in the **headless VM** (`tools/qhead`, only needs `gcc`).
-
+need the Quartz VM binary `./quartz`, built from `quartz-src/` (it uses raylib). 
 ```sh
 ./build-modules              # compile lib/*.meteor to lib/*.obj - once, and after every change of the library
 ./run hello_world            # compile examples/hello_world.meteor and start it
@@ -250,7 +247,6 @@ that are called end up in the program.
 
 > **Where import paths start.** The compiler resolves `import` and `include` relative to the compiled **`.obj`**
 > file, not to the source. That is why programs are compiled into `dist/` (a sibling of `lib/` and `inc/`);
-> `./run`, `tools/mbuild` and the tests do that for you. `calc/` is built in `calc/`, next to its own module.
 
 ### The standard library
 
@@ -455,36 +451,13 @@ It is split into a **module** (`calc_engine.meteor`: the arithmetic, no user int
 first version (`src/font_*_sheet.png`, `png2bin_fontsheet.py`) are no longer used. Run it with `./calc-scenario2`. The arithmetic is left to right
 (`2 + 3 * 4 = 20`), a division by zero shows `Err` until you press `C`.
 
-## Testing
-
-* `tests/run-tests` builds the library, then compiles and runs every `tests/test_*.meteor` (unit tests: pass /
-  fail counted by `tests/testkit.meteor`) and every `tests/screens/*.meteor` (the text screen is compared with
-  its `.expected` file; an optional `.in` file scripts the keyboard / mouse). A test can have a disk:
-  `<name>.disk0` (its size in sectors) or `<name>.prep` (a script that builds the image, e.g. with `fstool.py`),
-  and `<name>.fscheck` (options for `fstool.py check`, so that the **independent host implementation** verifies the
-  disk that the Meteor code has just written). `tests/sessions/*.txt` drive a whole program with typed text
-  (`examples/fsshell`) and compare its final screen with `<name>.expected`.
-* `tools/check-all` builds all examples and the calculator and starts each of them in the headless VM, looking
-  for compile errors and VM faults.
-* **`tools/qhead`** is a headless host for the Quartz VM: it uses the real `vm.c` / `bus.c` / `disk.c` and replaces
-  only the window with memory buffers.
-
-  ```sh
-  tools/qhead prog.bin --ram 8388608 --frames 60 --text            # print the text screen
-  tools/qhead prog.bin --frames 60 --ppm out.ppm                   # save the pixel layer (tools/ppm2png converts it)
-  tools/qhead prog.bin --frames 30 --input keys.in --cells         # scripted input, every cell with colours
-  tools/qhead prog.bin --disk0 boot.img --disk1 data.img
-  ```
-
-  The input script has one event per line: `@12 keys 262,65` (key codes held from frame 12 on, empty = none)
-  and `@14 mouse 100 50 1` (pixel position and button mask).
 
 ## Things to know
 
 * **A frame has a budget of 200 000 instructions.** If the program does not reach a `vsync` before it is used up,
   the host shows what has been drawn so far - an update that is too long for one frame flickers (this is what the
-  clock's black rectangle was). Measure with `tools/qhead prog.bin --frames N --report` (it lists the cut frames and
-  how often the terminal had to be rendered again); `tests/budget/*.conf` keep the examples within the budget. Heavy
+  clock's black rectangle was, it lists the cut frames and
+  how often the terminal had to be rendered again); Heavy
   text is the usual cause: build glyphs in advance with `gtext_prepare`, and redraw only what changed - the text
   screen keeps what was drawn, so an idle program should execute almost nothing.
 * `sys_ticks()` counts frames (vsyncs), not time; `sys_millis()` / `sys_time()` are the wall clock in milliseconds.
