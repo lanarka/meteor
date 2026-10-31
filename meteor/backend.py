@@ -406,8 +406,9 @@ class Result(object):
 
 class Generator(object):
     def __init__(self, base_dir=".", out_dir=".", comments=False, root_path=None,
-                 ext_data=False, data_path=None):
+                 ext_data=False, data_path=None, clear_ram=False):
         self.ext_data = ext_data
+        self.clear_ram = clear_ram
         self.data_path = data_path or "program.data.json"
         self.root_path = os.path.normpath(root_path) if root_path else None
         self.base_dir = base_dir
@@ -835,6 +836,21 @@ class Generator(object):
             if v.init is None:
                 break
             self.image += v.init
+
+    def emit_clear_ram(self):
+        """--clear-ram: zero RAM from ram_start to the end of the real RAM before anything else.
+        The compiler never stores zeros (not even the 0 that ends a string) and leaves uninitialised
+        variables alone: it relies on a zeroed RAM. A program started by `vmx` from a boot loader
+        gets the RAM of its loader instead, so such a program has to clear it itself."""
+        self.emit("// clear RAM: this program may be started by vmx over the RAM of another program")
+        a, v, n = self.alloc(), self.alloc(), self.alloc()
+        self.emit("movi u32 #%d %d" % (a, self.ram_start))
+        self.emit("movi u32 #%d 0" % v)
+        self.emit("ramsize #%d" % n)
+        self.emit("subi u32 #%d %d" % (n, self.ram_start))
+        self.emit("memset #%d #%d #%d" % (a, v, n))
+        for r in (n, v, a):
+            self.free_reg(r)
 
     def emit_image(self):
         """Write the initial RAM image with movi + store (8/4/2/1 byte pieces, zero pieces skipped)."""
@@ -1792,6 +1808,8 @@ class Generator(object):
 
         # prologue: static data, then non-constant global initialisers, then module init code
         self.scope = {}
+        if self.clear_ram:
+            self.emit_clear_ram()
         if not self.ext_data:
             self.emit_image()
         for var in [v for v in self.globals.values() if v.rt_init]:
@@ -1850,14 +1868,14 @@ class Generator(object):
 
 
 def compile_ast(ast, base_dir=".", out_dir=".", comments=False, root_path=None,
-                ext_data=False, data_path=None):
+                ext_data=False, data_path=None, clear_ram=False):
     """Compile an AST (already decoded) to a Result (.quartz text, .data_json or None).
     base_dir: directory used to resolve imports/includes; out_dir: directory of the output file
     (%include paths are written relative to it); root_path: path of the root file (cycle detection);
     ext_data/data_path: use a %data segment and the path written into the %data directive."""
     if not isinstance(ast, dict):
         raise MeteorError("program", "the AST root must be an object")
-    return Generator(base_dir, out_dir, comments, root_path, ext_data, data_path).program(ast)
+    return Generator(base_dir, out_dir, comments, root_path, ext_data, data_path, clear_ram).program(ast)
 
 
 def main(argv=None):
@@ -1866,6 +1884,8 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="output .quartz (default: <input>.quartz, '-' = stdout)")
     ap.add_argument("--ext-data", action="store_true",
                     help="put static data into <output>.data.json (+ %%data) instead of store instructions")
+    ap.add_argument("--clear-ram", action="store_true",
+                    help="zero the RAM at program start (for programs started with vmx by a loader)")
     ap.add_argument("--comments", action="store_true", help="annotate the output with structure comments")
     args = ap.parse_args(argv)
 
@@ -1880,7 +1900,7 @@ def main(argv=None):
     data_file = (os.path.splitext(args.input)[0] if out == "-" else os.path.splitext(out)[0]) + ".data.json"
     try:
         res = compile_ast(ast, os.path.dirname(os.path.abspath(args.input)), out_dir, args.comments,
-                          os.path.abspath(args.input), args.ext_data, os.path.relpath(data_file))
+                          os.path.abspath(args.input), args.ext_data, os.path.relpath(data_file), args.clear_ram)
     except MeteorError as e:
         sys.stderr.write("Meteor error in %s\n" % e)
         return 1
